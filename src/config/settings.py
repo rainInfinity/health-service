@@ -1,6 +1,10 @@
 import os
+from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 def _required_env(name: str) -> str:
