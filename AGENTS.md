@@ -71,4 +71,5 @@
 
 - Typescript 项目使用 `pnpm` 而不是 `npm` 管理依赖。
 - Python 项目使用 `uv` 管理依赖。
+- 抽离配置变量或新增配置项时，必须同步更新 `.env.template`。
 - 本机有 postgres 的 docker 镜像，可以创建容器进行测试。redis 已部署在本机
