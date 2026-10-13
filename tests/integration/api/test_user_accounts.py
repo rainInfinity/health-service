@@ -534,7 +534,7 @@ def test_profile_read_shares_one_record_and_projects_missing_profile():
         height_cm=Decimal("166.25"),
         weight_kg=Decimal("61.50"),
         medical_history="季节性过敏",
-        history_json={"isDiabetic": False},
+        history_json={"is_diabetic": False},
     )
     assert profile.user_id == user.pk
     empty_user = get_user_model().objects.create_user(
@@ -593,8 +593,8 @@ def test_profile_patch_preserves_absent_fields_and_merges_history_keys():
         weight_kg=Decimal("68.25"),
         medical_history="既有病史",
         history_json={
-            "isDiabetic": True,
-            "isHypertensive": True,
+            "is_diabetic": True,
+            "is_hypertensive": True,
             "legacyFlag": {"source": "persisted"},
         },
     )
@@ -645,7 +645,7 @@ def test_profile_patch_preserves_absent_fields_and_merges_history_keys():
     assert persisted.height_cm is None
     assert persisted.weight_kg == Decimal("68.25")
     assert persisted.history_json == {
-        "isHypertensive": False,
+        "is_hypertensive": False,
         "legacyFlag": {"source": "persisted"},
     }
 
@@ -721,11 +721,11 @@ def test_concurrent_profile_patches_preserve_distinct_fields_and_history_keys():
     changes = (
         {
             "name": "并发姓名",
-            "history_json": {"isDiabetic": True},
+            "history_json": {"is_diabetic": True},
         },
         {
             "medical_history": "并发病史",
-            "history_json": {"isHypertensive": False},
+            "history_json": {"is_hypertensive": False},
         },
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -737,8 +737,8 @@ def test_concurrent_profile_patches_preserve_distinct_fields_and_history_keys():
     assert profile.name == "并发姓名"
     assert profile.medical_history == "并发病史"
     assert profile.history_json == {
-        "isDiabetic": True,
-        "isHypertensive": False,
+        "is_diabetic": True,
+        "is_hypertensive": False,
         "legacyFlag": "preserved",
     }
 
@@ -847,3 +847,29 @@ def test_profile_routes_confine_reads_and_patches_to_authenticated_user():
 
     assert inactive.status_code == 401
     assert inactive.json()["code"] == "INVALID_TOKEN"
+
+
+def test_profile_openapi_documents_optional_public_history_flags():
+    """验证资料 OpenAPI 公开驼峰病史键且不把缺失键声明为必填。"""
+
+    async def read_schema():
+        """读取实际 API OpenAPI JSON。"""
+        return await AsyncClient().get("/api/v1/openapi.json")
+
+    response = asyncio.run(read_schema())
+    assert response.status_code == 200
+    schema = response.json()
+    components = schema["components"]["schemas"]
+    operation = schema["paths"]["/api/v1/{channel}/users/me/profile"]["get"]
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    envelope_name = response_schema["$ref"].rsplit("/", maxsplit=1)[-1]
+    profile_name = components[envelope_name]["properties"]["data"]["$ref"].rsplit(
+        "/",
+        maxsplit=1,
+    )[-1]
+    history_schema = components[profile_name]["properties"]["historyJson"]
+
+    assert set(history_schema["properties"]) == {"isDiabetic", "isHypertensive"}
+    assert not {"is_diabetic", "is_hypertensive"} & set(history_schema["properties"])
+    assert not {"isDiabetic", "isHypertensive"} & set(history_schema.get("required", []))
+    assert history_schema["additionalProperties"] is True

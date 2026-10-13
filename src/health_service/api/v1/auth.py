@@ -43,7 +43,7 @@ async def register(request: HttpRequest, channel: str, body: AccountCredentialsR
     require_ordinary_channel(channel)
     request.api_channel = channel
     try:
-        user = await sync_to_async(register_user, thread_sensitive=True)(
+        account = await sync_to_async(register_user, thread_sensitive=True)(
             username=body.username,
             password=body.password,
         )
@@ -51,7 +51,7 @@ async def register(request: HttpRequest, channel: str, body: AccountCredentialsR
         raise ApiError(ApiErrorCode.USERNAME_EXISTS) from error
     return success_response(
         request,
-        UserPublicResponse(user_id=user.pk, username=user.username),
+        UserPublicResponse(user_id=account.user_id, username=account.username),
         status=201,
     )
 

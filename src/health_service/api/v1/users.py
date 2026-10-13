@@ -7,10 +7,12 @@ from ninja import Router
 from health_service.api.responses import ApiResponse, success_response
 from health_service.application.profiles import read_profile, update_profile
 from health_service.infrastructure.auth.access import ChannelAccessAuth
-from health_service.models import Profile
 from health_service.schemas.requests.profiles import ProfilePatchRequest
 from health_service.schemas.responses.accounts import UserPublicResponse
-from health_service.schemas.responses.profiles import MyProfileResponse
+from health_service.schemas.responses.profiles import (
+    MyProfileResponse,
+    to_my_profile_response,
+)
 
 from .common import require_authenticated_channel
 from .contracts import ERROR_RESPONSES
@@ -18,11 +20,6 @@ from .contracts import ERROR_RESPONSES
 router = Router()
 
 
-def _profile_response(profile: Profile | None) -> MyProfileResponse:
-    """将资料模型或缺失记录映射为完整公开投影。"""
-    if profile is None:
-        return MyProfileResponse()
-    return MyProfileResponse.model_validate(profile)
 
 
 @router.get(
@@ -51,7 +48,7 @@ async def read_my_profile(request: HttpRequest, channel: str):
     """返回本人健康资料；不存在时仅投影未填写值。"""
     require_authenticated_channel(request, channel)
     profile = await sync_to_async(read_profile, thread_sensitive=True)(request.user.pk)
-    return success_response(request, _profile_response(profile))
+    return success_response(request, to_my_profile_response(profile))
 
 
 @router.patch(
@@ -67,10 +64,10 @@ async def update_my_profile(request: HttpRequest, channel: str, body: ProfilePat
     if "history_json" in body.model_fields_set and body.history_json is not None:
         changes["history_json"] = body.history_json.model_dump(
             exclude_unset=True,
-            by_alias=True,
+            by_alias=False,
         )
     profile = await sync_to_async(update_profile, thread_sensitive=True)(
         request.user.pk,
         changes,
     )
-    return success_response(request, _profile_response(profile))
+    return success_response(request, to_my_profile_response(profile))

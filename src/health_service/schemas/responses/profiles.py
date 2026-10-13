@@ -1,4 +1,4 @@
-"""定义本人健康资料的公开响应字段和未填写默认值。"""
+"""定义本人健康资料的公开响应字段、默认值和字段命名转换。"""
 
 from datetime import date
 from decimal import Decimal
@@ -6,6 +6,8 @@ from typing import Any
 
 from ninja import Schema
 from pydantic import ConfigDict, Field
+
+from health_service.schemas.internal import ProfileData
 
 
 class MyProfileResponse(Schema):
@@ -39,4 +41,46 @@ class MyProfileResponse(Schema):
         default=None,
         alias="historyJson",
         description="结构化病史；未填写时为 null",
+        json_schema_extra={
+            "properties": {
+                "isDiabetic": {
+                    "type": "boolean",
+                    "description": "糖尿病标记；未填写时缺席",
+                },
+                "isHypertensive": {
+                    "type": "boolean",
+                    "description": "高血压标记；未填写时缺席",
+                },
+            },
+            "additionalProperties": True,
+        },
     )
+
+
+def to_my_profile_response(profile: ProfileData | None) -> MyProfileResponse:
+    """将内部资料结果转换为完整公开响应。"""
+    if profile is None:
+        return MyProfileResponse()
+    return MyProfileResponse(
+        name=profile.name,
+        gender=profile.gender,
+        birth_date=profile.birth_date,
+        height_cm=profile.height_cm,
+        weight_kg=profile.weight_kg,
+        medical_history=profile.medical_history,
+        history_json=_public_history_json(profile.history_json),
+    )
+
+
+def _public_history_json(history_json: dict[str, Any] | None) -> dict[str, Any] | None:
+    """只转换已定义病史键并保留扩展内容与键缺席状态。"""
+    if history_json is None:
+        return None
+    public_history = dict(history_json)
+    for internal_key, public_key in (
+        ("is_diabetic", "isDiabetic"),
+        ("is_hypertensive", "isHypertensive"),
+    ):
+        if internal_key in public_history:
+            public_history[public_key] = public_history.pop(internal_key)
+    return public_history
