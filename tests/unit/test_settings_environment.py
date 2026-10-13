@@ -1,3 +1,5 @@
+"""验证 Django 设置从运行环境读取配置。"""
+
 import json
 import os
 import shutil
@@ -27,6 +29,7 @@ print(json.dumps({
     "database_name": database["NAME"],
     "database_host": database["HOST"],
     "database_port": database["PORT"],
+    "log_dir": str(settings.LOG_DIR),
 }))
 """
 
@@ -42,6 +45,7 @@ def _isolated_project(tmp_path: Path) -> Path:
 
 
 def _dotenv_content(values: dict[str, str]) -> str:
+    """将环境变量映射序列化为 dotenv 文本。"""
     return "".join(f"{key}={value}\n" for key, value in values.items())
 
 
@@ -50,10 +54,11 @@ def _run_settings(
     working_directory: Path,
     process_settings: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """在隔离进程中加载临时项目设置。"""
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("DJANGO_", "POSTGRES_"))
+        if not key.startswith(("DJANGO_", "POSTGRES_")) and key != "LOG_DIR"
     }
     for name in ("PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT"):
         environment.pop(name, None)
@@ -70,11 +75,13 @@ def _run_settings(
 
 
 def _settings_output(process: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    """读取成功的隔离设置进程输出。"""
     assert process.returncode == 0, process.stderr
     return json.loads(process.stdout)
 
 
 def test_settings_load_required_values_from_project_dotenv(tmp_path: Path):
+    """验证必需设置可从项目 `.env` 加载。"""
     project_root = _isolated_project(tmp_path)
     (project_root / ".env").write_text(
         _dotenv_content({**_REQUIRED_SETTINGS, "DJANGO_DEBUG": "true", "POSTGRES_PORT": "55432"}),
@@ -92,6 +99,7 @@ def test_settings_load_required_values_from_project_dotenv(tmp_path: Path):
 
 
 def test_settings_work_with_only_process_environment(tmp_path: Path):
+    """验证仅使用进程环境也能加载设置。"""
     project_root = _isolated_project(tmp_path)
 
     settings = _settings_output(_run_settings(project_root, project_root, _REQUIRED_SETTINGS))
@@ -103,6 +111,7 @@ def test_settings_work_with_only_process_environment(tmp_path: Path):
 
 
 def test_process_environment_overrides_dotenv(tmp_path: Path):
+    """验证进程环境优先于项目 `.env`。"""
     project_root = _isolated_project(tmp_path)
     (project_root / ".env").write_text(_dotenv_content(_REQUIRED_SETTINGS), encoding="utf-8")
 
@@ -122,6 +131,7 @@ def test_process_environment_overrides_dotenv(tmp_path: Path):
 
 
 def test_empty_required_process_value_is_not_replaced_from_dotenv(tmp_path: Path):
+    """验证空进程值不会回退到 `.env`。"""
     project_root = _isolated_project(tmp_path)
     (project_root / ".env").write_text(_dotenv_content(_REQUIRED_SETTINGS), encoding="utf-8")
 
@@ -132,6 +142,7 @@ def test_empty_required_process_value_is_not_replaced_from_dotenv(tmp_path: Path
 
 
 def test_settings_find_project_dotenv_from_another_working_directory(tmp_path: Path):
+    """验证项目 `.env` 查找不依赖当前工作目录。"""
     project_root = _isolated_project(tmp_path)
     (project_root / ".env").write_text(_dotenv_content(_REQUIRED_SETTINGS), encoding="utf-8")
     working_directory = tmp_path / "outside-project"
@@ -147,6 +158,7 @@ def test_settings_find_project_dotenv_from_another_working_directory(tmp_path: P
 
 
 def test_only_template_cannot_supply_required_configuration(tmp_path: Path):
+    """验证 `.env.template` 不会充当运行时配置。"""
     project_root = _isolated_project(tmp_path)
     shutil.copyfile(_REPOSITORY_ROOT / ".env.template", project_root / ".env.template")
 
@@ -157,9 +169,69 @@ def test_only_template_cannot_supply_required_configuration(tmp_path: Path):
 
 
 def test_template_is_not_loaded_as_runtime_configuration(tmp_path: Path):
+    """验证模板文件不会参与运行时设置加载。"""
     project_root = _isolated_project(tmp_path)
     shutil.copyfile(_REPOSITORY_ROOT / ".env.template", project_root / ".env.template")
 
     settings = _settings_output(_run_settings(project_root, project_root, _REQUIRED_SETTINGS))
 
     assert settings["debug"] is False
+
+
+def test_log_dir_defaults_to_project_root(tmp_path: Path):
+    """未设置 LOG_DIR 时使用项目根目录下的默认日志目录。"""
+    project_root = _isolated_project(tmp_path)
+
+    settings = _settings_output(_run_settings(project_root, project_root, _REQUIRED_SETTINGS))
+
+    expected = project_root / "logs"
+    assert settings["log_dir"] == str(expected)
+    assert expected.is_dir()
+
+
+def test_log_dir_resolves_relative_values_from_project_root(tmp_path: Path):
+    """相对 LOG_DIR 从项目根目录解析，即使配置来自 .env。"""
+    project_root = _isolated_project(tmp_path)
+    (project_root / ".env").write_text(
+        _dotenv_content({**_REQUIRED_SETTINGS, "LOG_DIR": "var/logs"}),
+        encoding="utf-8",
+    )
+
+    settings = _settings_output(_run_settings(project_root, project_root))
+
+    expected = project_root / "var" / "logs"
+    assert settings["log_dir"] == str(expected)
+    assert expected.is_dir()
+
+
+def test_log_dir_accepts_absolute_values(tmp_path: Path):
+    """绝对 LOG_DIR 保持原路径并创建目录。"""
+    project_root = _isolated_project(tmp_path)
+    expected = tmp_path / "absolute-logs"
+
+    settings = _settings_output(
+        _run_settings(
+            project_root,
+            project_root,
+            {**_REQUIRED_SETTINGS, "LOG_DIR": str(expected)},
+        )
+    )
+
+    assert settings["log_dir"] == str(expected)
+    assert expected.is_dir()
+
+
+def test_log_dir_rejects_a_file_instead_of_a_directory(tmp_path: Path):
+    """日志路径无法作为目录创建时，设置加载明确失败。"""
+    project_root = _isolated_project(tmp_path)
+    blocked_path = tmp_path / "not-a-directory"
+    blocked_path.write_text("occupied", encoding="utf-8")
+
+    process = _run_settings(
+        project_root,
+        project_root,
+        {**_REQUIRED_SETTINGS, "LOG_DIR": str(blocked_path)},
+    )
+
+    assert process.returncode != 0
+    assert "LOG_DIR must be a writable directory" in process.stderr
