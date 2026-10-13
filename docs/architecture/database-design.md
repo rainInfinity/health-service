@@ -70,7 +70,7 @@ erDiagram
 | `height_cm` | 身高 | `NUMERIC(5,2)` | 可空；单位 cm，有值时大于零；未知值使用 `NULL` 而不是 `0`。 |
 | `weight_kg` | 体重 | `NUMERIC(6,2)` | 可空；单位 kg，有值时大于零；未知值使用 `NULL` 而不是 `0`。 |
 | `medical_history` | 病史文字 | `TEXT` | 可空。 |
-| `history_json` | 结构化病史 | `JSONB` | 可空；已知 `is_diabetic`、`is_hypertensive` 是可选布尔键，未填写时不写键或整个字段为 `NULL`，不能默认记为 `false`。 |
+| `history_json` | 结构化病史 | `JSONB` | 可空；持久化和内部字段使用 `is_diabetic`、`is_hypertensive` 两个可选布尔键，缺席时不写 `null` 或 `false`。HTTP 仍使用 `isDiabetic`、`isHypertensive`，仅由 API 边界转换。此命名规则不改变表结构，也不要求数据迁移。 |
 
 ### `health_channel`
 

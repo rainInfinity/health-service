@@ -159,6 +159,8 @@ curl --include --request PATCH \
 
 `historyJson` 对象按键合并：键值 `false` 会保留为明确否，键值 `null` 删除该键，整个字段为 `null` 则清空病史对象。未知入参（包括 `userId`）会被拒绝；PATCH 成功返回 HTTP 200 和更新后的完整资料。
 
+请求和响应中的已定义病史键继续使用 `isDiabetic`、`isHypertensive`；资料内部数据及 PostgreSQL `history_json` 使用 `is_diabetic`、`is_hypertensive`。API 只转换这两个已定义键，不改写其他扩展内容。此命名转换不改变表结构，也不需要数据迁移。
+
 ## Refresh 轮换与登出
 
 刷新和登出只在请求体中接收当前渠道的 `refreshToken`，不要求有效 Access；不要把 Refresh 放入 `Authorization` 头。成功刷新返回 HTTP 200，`data` 使用与登录相同的 `accessToken`、`refreshToken` 字段：
