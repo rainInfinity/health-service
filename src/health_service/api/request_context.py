@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from health_service.domain.channels import ORDINARY_CHANNELS
+
 
 @dataclass(slots=True)
 class RequestContext:
@@ -21,11 +23,6 @@ class RequestContext:
 _current_request: ContextVar[RequestContext | None] = ContextVar(
     "health_service_api_request", default=None
 )
-
-ORDINARY_CHANNELS = frozenset(
-    {"android-cn", "android-intl", "ios-cn", "ios-intl", "wxapp"}
-)
-
 
 
 def activate_request_context(context: RequestContext) -> Token[RequestContext | None]:
@@ -51,10 +48,7 @@ def require_request_context(request: Any | None = None) -> RequestContext:
     return context
 
 
-
-def update_request_metadata(
-    request: Any, context: RequestContext | None = None
-) -> None:
+def update_request_metadata(request: Any, context: RequestContext | None = None) -> None:
     context = context or require_request_context(request)
     match = getattr(request, "resolver_match", None)
     if match is not None:
@@ -63,13 +57,14 @@ def update_request_metadata(
             context.route = route
         kwargs = getattr(match, "kwargs", {})
         channel = kwargs.get("channel") if isinstance(kwargs, dict) else None
+        if channel not in ORDINARY_CHANNELS:
+            channel = getattr(request, "api_channel", None)
         if channel in ORDINARY_CHANNELS:
             context.channel = channel
 
     user_id = authenticated_user_id(request)
     if user_id is not None:
         context.user_id = user_id
-
 
 
 def authenticated_user_id(request: Any) -> str | None:

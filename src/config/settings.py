@@ -1,6 +1,7 @@
 """Django 项目设置及环境配置。"""
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -19,11 +20,10 @@ def _required_env(name: str) -> str:
 
 
 SECRET_KEY = _required_env("DJANGO_SECRET_KEY")
+JWT_SIGNING_KEY = _required_env("JWT_SIGNING_KEY")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").casefold() in {"1", "true", "yes", "on"}
 ALLOWED_HOSTS = [
-    host.strip()
-    for host in _required_env("DJANGO_ALLOWED_HOSTS").split(",")
-    if host.strip()
+    host.strip() for host in _required_env("DJANGO_ALLOWED_HOSTS").split(",") if host.strip()
 ]
 if not ALLOWED_HOSTS:
     raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS must contain at least one host")
@@ -34,9 +34,7 @@ if not _log_dir_value.strip():
 
 _configured_log_dir = Path(_log_dir_value)
 LOG_DIR = (
-    _configured_log_dir
-    if _configured_log_dir.is_absolute()
-    else PROJECT_ROOT / _configured_log_dir
+    _configured_log_dir if _configured_log_dir.is_absolute() else PROJECT_ROOT / _configured_log_dir
 )
 try:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,6 +49,7 @@ if not LOG_DIR.is_dir() or not os.access(
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
+    "ninja_jwt.token_blacklist",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
@@ -99,6 +98,13 @@ DATABASES = {
 }
 
 AUTH_USER_MODEL = "health_service.User"
+
+NINJA_JWT = {
+    "SIGNING_KEY": JWT_SIGNING_KEY,
+    "AUTH_TOKEN_CLASSES": ("ninja_jwt.tokens.AccessToken",),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=10),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+}
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},

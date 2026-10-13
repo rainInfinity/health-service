@@ -15,6 +15,7 @@ _REQUIRED_SETTINGS = {
     "POSTGRES_USER": "health_service",
     "POSTGRES_PASSWORD": "unit-test-password",
     "POSTGRES_HOST": "database-from-file",
+    "JWT_SIGNING_KEY": "unit-test-independent-jwt-signing-key",
 }
 _SETTINGS_SCRIPT = """
 import json
@@ -22,6 +23,9 @@ import config.settings as settings
 
 database = settings.DATABASES["default"]
 print(json.dumps({
+    "jwt_signing_key": settings.NINJA_JWT["SIGNING_KEY"],
+    "access_token_lifetime_seconds": settings.NINJA_JWT["ACCESS_TOKEN_LIFETIME"].total_seconds(),
+    "refresh_token_lifetime_seconds": settings.NINJA_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds(),
     "secret_key": settings.SECRET_KEY,
     "debug": settings.DEBUG,
     "allowed_hosts": settings.ALLOWED_HOSTS,
@@ -58,7 +62,12 @@ def _run_settings(
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("DJANGO_", "POSTGRES_")) and key != "LOG_DIR"
+        if not key.startswith(("DJANGO_", "POSTGRES_"))
+        and key
+        not in {
+            "LOG_DIR",
+            "JWT_SIGNING_KEY",
+        }
     }
     for name in ("PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT"):
         environment.pop(name, None)
@@ -96,6 +105,10 @@ def test_settings_load_required_values_from_project_dotenv(tmp_path: Path):
     assert settings["database_engine"] == "django.db.backends.postgresql"
     assert settings["database_host"] == "database-from-file"
     assert settings["database_port"] == "55432"
+
+    assert settings["jwt_signing_key"] == _REQUIRED_SETTINGS["JWT_SIGNING_KEY"]
+    assert settings["access_token_lifetime_seconds"] == 600
+    assert settings["refresh_token_lifetime_seconds"] == 604800
 
 
 def test_settings_work_with_only_process_environment(tmp_path: Path):
@@ -139,6 +152,19 @@ def test_empty_required_process_value_is_not_replaced_from_dotenv(tmp_path: Path
 
     assert process.returncode != 0
     assert "Missing required environment variable: DJANGO_SECRET_KEY" in process.stderr
+
+
+def test_missing_jwt_signing_key_fails(tmp_path: Path):
+    """验证独立 JWT 签名密钥缺失时 Django 明确拒绝启动。"""
+    project_root = _isolated_project(tmp_path)
+    required_settings = {
+        name: value for name, value in _REQUIRED_SETTINGS.items() if name != "JWT_SIGNING_KEY"
+    }
+
+    process = _run_settings(project_root, project_root, required_settings)
+
+    assert process.returncode != 0
+    assert "Missing required environment variable: JWT_SIGNING_KEY" in process.stderr
 
 
 def test_settings_find_project_dotenv_from_another_working_directory(tmp_path: Path):
