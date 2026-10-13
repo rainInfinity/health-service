@@ -7,7 +7,7 @@
 ## Requirements
 
 ### Requirement: 成功与失败采用同一回复结构
-`/api/v1/` 下的 JSON 业务回复 MUST 同时包含 `code`、`message`、`data`、`requestId`；`code` MUST 为稳定字符串业务码，成功时为 `OK`，HTTP 状态 MUST 准确表达请求结果。无业务载荷时 `data` MUST 为 `null` 且仍返回响应体。
+`/api/v1/` 下的 JSON 业务回复 MUST 同时包含 `code`、`message`、`data`、`requestId`；`code` MUST 为稳定字符串业务码，成功时为 `OK`，HTTP 状态 MUST 准确表达请求结果。无业务载荷时 `data` MUST 为 `null` 且仍返回响应体。成功与错误 JSON 回复 MUST 使用 UTF-8 编码，直接输出中文等非 ASCII 字符而不转义为 `\uXXXX`；引号、反斜杠和控制字符仍 MUST 按 JSON 规则转义。
 
 #### Scenario: 带载荷的成功
 - **WHEN** 客户端成功读取本人账号或创建账号
@@ -16,6 +16,10 @@
 #### Scenario: 无载荷的成功
 - **WHEN** 客户端成功登出且无业务数据需要返回
 - **THEN** 响应使用 HTTP 200 并包含 `code: "OK"`、`data: null`，不以无响应体的 204 代替统一结构
+
+#### Scenario: 成功与错误响应直接输出中文
+- **WHEN** 成功或错误回复的 `message` 或 `data` 包含中文等非 ASCII 字符
+- **THEN** 原始响应以 UTF-8 直接包含这些字符而非对应的 `\uXXXX` 转义，解析后的字段值保持不变，JSON 必需的字符转义仍正确保留
 
 ### Requirement: 可识别错误具有稳定状态和安全消息
 系统 MUST 将可识别的认证失败、权限拒绝、资源或方法不存在、数据冲突、输入校验失败映射为相应 HTTP 401、403、404、405、409、422 和稳定业务码；不得用 HTTP 200 包装失败。

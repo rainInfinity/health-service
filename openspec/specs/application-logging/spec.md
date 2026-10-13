@@ -7,11 +7,11 @@
 ## Requirements
 
 ### Requirement: API 与通用应用日志分类输出
-系统 MUST 将 API 请求及异常事件写入 `server.log`，将通用应用事件写入 `application.log`；每条记录 MUST 同时以单行 JSON 写入标准输出，且文件与标准输出中的该事件内容一致。
+系统 MUST 将 API 请求及异常事件写入 `server.log`，将通用应用事件写入 `application.log`；两个文件中的每条记录 MUST 为单行 JSON。相同事件 MUST 同时以单行 `key=value` 结构化记录写入标准输出，保留与文件记录一致的安全字段和值。
 
 #### Scenario: API 请求完成
 - **WHEN** 一个 API 请求成功或以已知客户端错误结束
-- **THEN** 对应的结构化完成记录出现在标准输出和 `server.log`，并包含实际状态与请求标识
+- **THEN** 对应的完成记录出现在标准输出和 `server.log`，文件为 JSON，标准输出包含实际状态与请求标识
 
 #### Scenario: API 请求发生未预期异常
 - **WHEN** 一个 API 请求触发未预期异常
@@ -20,6 +20,17 @@
 #### Scenario: 通用应用事件
 - **WHEN** 应用在 API 请求之外写出一个稳定事件
 - **THEN** 该事件出现在标准输出和 `application.log`，且不会伪造请求标识
+
+### Requirement: 控制台日志可读并支持终端高亮
+系统 MUST 将标准输出日志格式化为单行 `key=value` 文本，并保留 JSON 文件日志的相同安全字段。标准输出连接交互终端时 MUST 为级别、事件和 HTTP 状态添加 ANSI 高亮；标准输出被重定向时 MUST NOT 包含 ANSI 控制码。
+
+#### Scenario: 交互终端显示日志
+- **WHEN** 标准输出连接交互终端并写出日志
+- **THEN** 日志使用可读的键值格式，级别、事件和 HTTP 状态带有 ANSI 高亮
+
+#### Scenario: 日志被重定向或采集
+- **WHEN** 标准输出未连接交互终端
+- **THEN** 日志仍为单行键值格式，且不含 ANSI 控制码
 
 ### Requirement: 日志目录可配置且写入失败显式
 系统 MUST 允许通过 `LOG_DIR` 配置日志目录；未设置时 MUST 使用项目根目录下的 `logs/`，相对路径相对于项目根目录解析，绝对路径按原值使用。服务 MUST 创建缺失目录；当目录不能创建或写入时 MUST 明确报告启动错误，不得静默丢弃文件日志。
