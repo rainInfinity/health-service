@@ -118,6 +118,9 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
+        "console": {
+            "()": "health_service.api.structured_logging.ConsoleApiFormatter",
+        },
         "api_json": {
             "()": "health_service.api.structured_logging.StructuredApiFormatter",
         },
@@ -125,7 +128,7 @@ LOGGING = {
     "handlers": {
         "structured_stdout": {
             "class": "health_service.api.structured_logging.StandardOutputHandler",
-            "formatter": "api_json",
+            "formatter": "console",
         },
         "api_file": {
             "class": "logging.handlers.TimedRotatingFileHandler",

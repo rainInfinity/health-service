@@ -28,6 +28,14 @@ _API_LOG_FIELDS = (
     "exceptionType",
     "locations",
 )
+_LEVEL_COLORS = {
+    logging.DEBUG: "36",
+    logging.INFO: "32",
+    logging.WARNING: "33",
+    logging.ERROR: "31",
+    logging.CRITICAL: "1;31",
+}
+_STATUS_COLORS = {2: "32", 3: "36", 4: "33", 5: "31"}
 
 
 class StandardOutputHandler(logging.StreamHandler):
@@ -39,44 +47,94 @@ class StandardOutputHandler(logging.StreamHandler):
         super().emit(record)
 
 
+def _structured_entry(record: logging.LogRecord) -> dict[str, Any]:
+    """从日志记录中构造只含安全字段的结构化条目。"""
+    is_api_record = record.name == _API_LOGGER.name or record.name.startswith(
+        f"{_API_LOGGER.name}."
+    )
+    event = getattr(record, "event", None)
+    if is_api_record:
+        stable_event = (
+            event if isinstance(event, str) and event in _API_EVENT_NAMES else "api.event"
+        )
+        fields = _API_LOG_FIELDS
+    else:
+        stable_event = (
+            event
+            if isinstance(event, str)
+            and len(event) <= 64
+            and _APPLICATION_EVENT_PATTERN.fullmatch(event)
+            else "application.event"
+        )
+        fields = ()
+
+    entry: dict[str, Any] = {
+        "timestamp": datetime.fromtimestamp(record.created, UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "level": record.levelname,
+        "event": stable_event,
+    }
+    for field in fields:
+        value = getattr(record, field, None)
+        if value is not None:
+            entry[field] = value
+    return entry
+
+
+def _format_console_value(value: Any) -> str:
+    """按单行键值格式编码字段值，避免空格破坏字段边界。"""
+    if isinstance(value, str):
+        if value and not any(char.isspace() or char in '="' or char == "\\" for char in value):
+            return value
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (dict, list)):
+        encoded_json = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(encoded_json, ensure_ascii=False)
+    return str(value)
+
+
+def _colorize(value: str, color: str | None, enabled: bool) -> str:
+    """仅在终端输出时为字段添加 ANSI 颜色。"""
+    if not enabled or color is None:
+        return value
+    return f"\x1b[{color}m{value}\x1b[0m"
+
+
 class StructuredApiFormatter(logging.Formatter):
-    """使用白名单字段序列化 API 与通用应用日志。"""
+    """将安全日志字段序列化为单行 JSON。"""
 
     def format(self, record: logging.LogRecord) -> str:
-        """API 记录输出请求白名单，应用事件只输出稳定事件名。"""
-        is_api_record = record.name == _API_LOGGER.name or record.name.startswith(
-            f"{_API_LOGGER.name}."
+        """生成 API 或通用应用事件的 JSON 记录。"""
+        return json.dumps(
+            _structured_entry(record),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
-        event = getattr(record, "event", None)
-        if is_api_record:
-            stable_event = (
-                event
-                if isinstance(event, str) and event in _API_EVENT_NAMES
-                else "api.event"
-            )
-            fields = _API_LOG_FIELDS
-        else:
-            stable_event = (
-                event
-                if isinstance(event, str)
-                and len(event) <= 64
-                and _APPLICATION_EVENT_PATTERN.fullmatch(event)
-                else "application.event"
-            )
-            fields = ()
 
-        entry: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, UTC)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z"),
-            "level": record.levelname,
-            "event": stable_event,
-        }
-        for field in fields:
-            value = getattr(record, field, None)
-            if value is not None:
-                entry[field] = value
-        return json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+
+class ConsoleApiFormatter(logging.Formatter):
+    """生成人类可读的单行键值日志，并在交互终端高亮。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """格式化安全字段；非终端输出不含 ANSI 控制码。"""
+        entry = _structured_entry(record)
+        is_tty = getattr(sys.stdout, "isatty", lambda: False)()
+        parts = []
+        for key, value in entry.items():
+            field = f"{key}={_format_console_value(value)}"
+            if key == "level":
+                field = _colorize(field, _LEVEL_COLORS.get(record.levelno), is_tty)
+            elif key == "event":
+                field = _colorize(field, "36", is_tty)
+            elif key == "status" and isinstance(value, int):
+                field = _colorize(
+                    field,
+                    _STATUS_COLORS.get(value // 100),
+                    is_tty,
+                )
+            parts.append(field)
+        return " ".join(parts)
 
 
 def log_request_completed(context: RequestContext, status: int, duration_ms: float) -> None:

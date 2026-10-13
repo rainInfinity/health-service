@@ -2,9 +2,12 @@
 
 import asyncio
 import copy
+import io
 import json
 import logging
 import logging.config
+import shlex
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -12,6 +15,8 @@ from pathlib import Path
 
 from django.conf import settings
 from django.test import AsyncClient, override_settings
+
+from health_service.api.structured_logging import ConsoleApiFormatter
 
 
 @contextmanager
@@ -21,9 +26,7 @@ def _isolated_file_logging(log_dir: Path) -> Iterator[Path]:
     original_logging = copy.deepcopy(settings.LOGGING)
     isolated_logging = copy.deepcopy(settings.LOGGING)
     isolated_logging["handlers"]["api_file"]["filename"] = str(log_dir / "server.log")
-    isolated_logging["handlers"]["application_file"]["filename"] = str(
-        log_dir / "application.log"
-    )
+    isolated_logging["handlers"]["application_file"]["filename"] = str(log_dir / "application.log")
     try:
         logging.config.dictConfig(isolated_logging)
         yield log_dir
@@ -31,12 +34,54 @@ def _isolated_file_logging(log_dir: Path) -> Iterator[Path]:
         logging.config.dictConfig(original_logging)
 
 
+def _parse_console_records(output: str) -> list[dict[str, str]]:
+    """解析人类可读的日志键值行。"""
+    records = []
+    for line in output.splitlines():
+        if line.startswith("timestamp="):
+            records.append(dict(field.split("=", 1) for field in shlex.split(line)))
+    return records
+
+
+def test_console_formatter_colors_only_interactive_stdout(monkeypatch):
+    """验证终端高亮开启，而重定向输出不含 ANSI 控制码。"""
+
+    class TerminalOutput(io.StringIO):
+        def isatty(self) -> bool:
+            """声明该输出模拟交互终端。"""
+            return True
+
+    record = logging.LogRecord(
+        "health_service.api",
+        logging.ERROR,
+        __file__,
+        1,
+        "ignored",
+        (),
+        None,
+    )
+    record.event = "request.exception"
+    record.status = 500
+
+    monkeypatch.setattr(sys, "stdout", TerminalOutput())
+    colored = ConsoleApiFormatter().format(record)
+
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    plain = ConsoleApiFormatter().format(record)
+
+    assert "\x1b[31mlevel=ERROR\x1b[0m" in colored
+    assert "\x1b[36mevent=request.exception\x1b[0m" in colored
+    assert "\x1b[31mstatus=500\x1b[0m" in colored
+    assert "\x1b[" not in plain
+    assert "event=request.exception" in plain
+
+
 @override_settings(
     ROOT_URLCONF="tests.integration.api.urls",
     ALLOWED_HOSTS=["testserver"],
 )
-def test_request_completion_is_one_json_record_with_safe_route_metadata(capsys):
-    """验证完成记录为单条安全 JSON，并使用路由模板。"""
+def test_request_completion_has_readable_console_fields(capsys):
+    """验证完成事件以安全、可读的键值格式输出。"""
     output_before = capsys.readouterr().out
 
     async def send():
@@ -49,7 +94,7 @@ def test_request_completion_is_one_json_record_with_safe_route_metadata(capsys):
 
     response = asyncio.run(send())
     output = capsys.readouterr().out
-    records = [json.loads(line) for line in output.splitlines()]
+    records = _parse_console_records(output)
 
     assert response.status_code == 200
     assert response["X-Request-ID"] != "CLIENT-REQUEST-ID-SENTINEL"
@@ -60,10 +105,12 @@ def test_request_completion_is_one_json_record_with_safe_route_metadata(capsys):
     datetime.fromisoformat(record["timestamp"])
     assert record["level"] == "INFO"
     assert record["method"] == "GET"
-    assert record["status"] == 200
-    assert record["durationMs"] >= 0
+    assert record["status"] == "200"
+    assert float(record["durationMs"]) >= 0
     assert record["requestId"] == response["X-Request-ID"]
     assert record["route"].endswith("success")
+    assert not output.lstrip().startswith("{")
+    assert "\x1b[" not in output
     assert "QUERY-SECRET-SENTINEL" not in output_before + output
     assert "CLIENT-REQUEST-ID-SENTINEL" not in output
 
@@ -74,6 +121,7 @@ def test_request_completion_is_one_json_record_with_safe_route_metadata(capsys):
 )
 def test_response_header_body_and_completion_log_share_request_id(capsys):
     """验证响应头、正文与完成日志共享请求标识。"""
+
     async def send_requests():
         """发送覆盖成功和错误状态的请求组。"""
         client = AsyncClient()
@@ -90,7 +138,7 @@ def test_response_header_body_and_completion_log_share_request_id(capsys):
 
     responses = asyncio.run(send_requests())
     output = capsys.readouterr().out
-    records = [json.loads(line) for line in output.splitlines()]
+    records = _parse_console_records(output)
     completed = [record for record in records if record["event"] == "request.completed"]
     by_request_id = {record["requestId"]: record for record in completed}
     expected = {
@@ -107,13 +155,12 @@ def test_response_header_body_and_completion_log_share_request_id(capsys):
         record = by_request_id[response["X-Request-ID"]]
         assert body["requestId"] == response["X-Request-ID"]
         assert body["code"] == code
-        assert record["status"] == response.status_code
+        assert record["status"] == str(response.status_code)
         assert record.get("errorCode") == log_code
-    missing = next(record for record in completed if record["status"] == 404)
+    missing = next(record for record in completed if record["status"] == "404")
     assert missing["route"] == "<unmatched>"
     assert "CORRELATION-QUERY-SENTINEL" not in output
     assert "CORRELATION-PASSWORD-SENTINEL" not in output
-
 
 
 @override_settings(
@@ -122,6 +169,7 @@ def test_response_header_body_and_completion_log_share_request_id(capsys):
 )
 def test_concurrent_channel_and_authenticated_user_context_is_isolated(capsys):
     """验证并发请求的渠道和用户上下文互不串扰。"""
+
     async def send(channel: str, user_id: int) -> tuple[str, object]:
         """发送带独立身份和渠道的受保护请求。"""
         client = AsyncClient()
@@ -143,7 +191,7 @@ def test_concurrent_channel_and_authenticated_user_context_is_isolated(capsys):
 
     results = asyncio.run(send_concurrently())
     output = capsys.readouterr().out
-    records = [json.loads(line) for line in output.splitlines()]
+    records = _parse_console_records(output)
     completed = [record for record in records if record["event"] == "request.completed"]
 
     assert len(completed) == 2
@@ -160,9 +208,7 @@ def test_concurrent_channel_and_authenticated_user_context_is_isolated(capsys):
     for record in completed:
         user_id = int(record["userId"])
         assert record["channel"] == expected[user_id]
-        assert record["requestId"] in {
-            response["X-Request-ID"] for _, response in results
-        }
+        assert record["requestId"] in {response["X-Request-ID"] for _, response in results}
         assert "QUERY-SECRET-SENTINEL" not in output
         assert f"CLIENT-{user_id}" not in output
         assert expected[user_id] not in record["route"]
@@ -172,9 +218,7 @@ def test_concurrent_channel_and_authenticated_user_context_is_isolated(capsys):
     ROOT_URLCONF="tests.integration.api.urls",
     ALLOWED_HOSTS=["testserver"],
 )
-def test_credentials_and_sensitive_values_stay_out_of_every_log_sink(
-    capsys, tmp_path
-):
+def test_credentials_and_sensitive_values_stay_out_of_every_log_sink(capsys, tmp_path):
     """验证请求输入和应用异常不会泄露到任一日志输出。"""
     with _isolated_file_logging(tmp_path / "logs") as log_dir:
         capsys.readouterr()
@@ -204,8 +248,7 @@ def test_credentials_and_sensitive_values_stay_out_of_every_log_sink(
                 content_type="application/json",
             )
             unmatched = await client.get(
-                "/api/v1/missing/APPLICATION-RAW-PATH-SENTINEL"
-                "?secret=APPLICATION-QUERY-SENTINEL",
+                "/api/v1/missing/APPLICATION-RAW-PATH-SENTINEL?secret=APPLICATION-QUERY-SENTINEL",
             )
             return unauthenticated, invalid, unmatched
 
@@ -229,11 +272,9 @@ def test_credentials_and_sensitive_values_stay_out_of_every_log_sink(
         stdout = capsys.readouterr().out
         server_text = (log_dir / "server.log").read_text(encoding="utf-8")
         application_text = (log_dir / "application.log").read_text(encoding="utf-8")
-        stdout_records = [json.loads(line) for line in stdout.splitlines()]
+        stdout_records = _parse_console_records(stdout)
         server_records = [json.loads(line) for line in server_text.splitlines()]
-        application_records = [
-            json.loads(line) for line in application_text.splitlines()
-        ]
+        application_records = [json.loads(line) for line in application_text.splitlines()]
         all_logs = stdout + server_text + application_text
 
         assert [response.status_code for response in responses] == [401, 422, 404]
@@ -241,13 +282,27 @@ def test_credentials_and_sensitive_values_stay_out_of_every_log_sink(
         assert application_records[0]["event"] == "application.event"
         assert "requestId" not in application_records[0]
         assert "route" not in application_records[0]
-        assert application_records == [
+        stdout_application = [
             record for record in stdout_records if record["event"] == "application.event"
         ]
+        assert len(stdout_application) == 1
+        assert all(
+            stdout_application[0][field] == str(application_records[0][field])
+            for field in ("timestamp", "level", "event")
+        )
+        stdout_api = [record for record in stdout_records if record["event"] != "application.event"]
         assert all(record["event"] != "application.event" for record in server_records)
-        assert [
-            record for record in stdout_records if record["event"] != "application.event"
-        ] == server_records
+        assert len(stdout_api) == len(server_records)
+        for file_record in server_records:
+            console_record = next(
+                record
+                for record in stdout_api
+                if record["event"] == file_record["event"]
+                and record["requestId"] == file_record["requestId"]
+            )
+            assert console_record["timestamp"] == file_record["timestamp"]
+            assert console_record["status"] == str(file_record["status"])
+            assert console_record["level"] == file_record["level"]
 
         for sentinel in (
             "PHONE-SENTINEL",
@@ -269,9 +324,7 @@ def test_credentials_and_sensitive_values_stay_out_of_every_log_sink(
             "APPLICATION-HEALTH-SENTINEL",
             "APPLICATION-FORWARDED-IP-SENTINEL",
         ):
-            assert all(
-                sentinel not in response.content.decode() for response in responses
-            )
+            assert all(sentinel not in response.content.decode() for response in responses)
             assert sentinel not in all_logs
 
 
@@ -303,21 +356,15 @@ def test_api_and_application_logs_are_routed_without_duplicates(capsys, tmp_path
         stdout = capsys.readouterr().out
         server_text = (log_dir / "server.log").read_text(encoding="utf-8")
         application_text = (log_dir / "application.log").read_text(encoding="utf-8")
-        stdout_records = [json.loads(line) for line in stdout.splitlines()]
+        stdout_records = _parse_console_records(stdout)
         server_records = [json.loads(line) for line in server_text.splitlines()]
-        application_records = [
-            json.loads(line) for line in application_text.splitlines()
-        ]
+        application_records = [json.loads(line) for line in application_text.splitlines()]
         request_id = response["X-Request-ID"]
         stdout_completed = [
-            record
-            for record in stdout_records
-            if record["event"] == "request.completed"
+            record for record in stdout_records if record["event"] == "request.completed"
         ]
         file_completed = [
-            record
-            for record in server_records
-            if record["event"] == "request.completed"
+            record for record in server_records if record["event"] == "request.completed"
         ]
         stdout_application = [
             record for record in stdout_records if record["event"] == "application.test"
@@ -327,14 +374,17 @@ def test_api_and_application_logs_are_routed_without_duplicates(capsys, tmp_path
         assert response.json()["requestId"] == request_id
         assert len(stdout_completed) == len(file_completed) == 1
         assert stdout_completed[0]["requestId"] == request_id
-        assert file_completed[0] == stdout_completed[0]
+        assert stdout_completed[0]["event"] == file_completed[0]["event"]
+        assert stdout_completed[0]["timestamp"] == file_completed[0]["timestamp"]
+        assert stdout_completed[0]["status"] == str(file_completed[0]["status"])
         assert len(stdout_application) == 1
-        assert application_records == stdout_application
+        assert all(
+            stdout_application[0][field] == str(application_records[0][field])
+            for field in ("timestamp", "level", "event")
+        )
         assert set(application_records[0]) == {"timestamp", "level", "event"}
         assert all(record["event"] != "application.test" for record in server_records)
-        assert all(
-            record["event"] != "request.completed" for record in application_records
-        )
+        assert all(record["event"] != "request.completed" for record in application_records)
         for output in (stdout, server_text, application_text):
             for sentinel in (
                 "APPLICATION-MESSAGE-SENTINEL",

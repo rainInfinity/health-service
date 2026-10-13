@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -135,7 +136,9 @@ def test_real_uvicorn_requests_write_separate_safe_logs(tmp_path: Path):
     server_records = [json.loads(line) for line in server_text.splitlines()]
     application_records = [json.loads(line) for line in application_text.splitlines()]
     stdout_records = [
-        json.loads(line) for line in stdout.splitlines() if line.startswith("{")
+        dict(field.split("=", 1) for field in shlex.split(line))
+        for line in stdout.splitlines()
+        if line.startswith("timestamp=")
     ]
     api_stdout_records = [
         record for record in stdout_records if record["event"] != "application.test"
@@ -146,8 +149,19 @@ def test_real_uvicorn_requests_write_separate_safe_logs(tmp_path: Path):
     completed = [record for record in server_records if record["event"] == "request.completed"]
     exceptions = [record for record in server_records if record["event"] == "request.exception"]
 
-    assert api_stdout_records == server_records
-    assert application_stdout_records == application_records
+    assert len(api_stdout_records) == len(server_records)
+    for console_record, file_record in zip(api_stdout_records, server_records, strict=True):
+        assert console_record.keys() == file_record.keys()
+        for field, value in file_record.items():
+            if field == "locations":
+                assert json.loads(console_record[field]) == value
+            else:
+                assert console_record[field] == str(value)
+    assert len(application_stdout_records) == len(application_records)
+    for console_record, file_record in zip(
+        application_stdout_records, application_records, strict=True
+    ):
+        assert console_record == {field: str(value) for field, value in file_record.items()}
     assert len(completed) == 4
     assert {record["requestId"] for record in completed} == set(request_ids)
     assert next(record for record in completed if record["status"] == 404)["route"] == "<unmatched>"
@@ -157,7 +171,8 @@ def test_real_uvicorn_requests_write_separate_safe_logs(tmp_path: Path):
     assert set(application_records[0]) == {"timestamp", "level", "event"}
     assert application_records[0]["level"] == "INFO"
     assert application_records[0]["event"] == "application.test"
-    assert "\"GET /api/v1/" not in stdout
+    assert "\x1b[" not in stdout
+    assert '"GET /api/v1/' not in stdout
 
     all_logs = stdout + server_text + application_text
     for sentinel in (

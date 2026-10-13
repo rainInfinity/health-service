@@ -1,5 +1,6 @@
 import asyncio
 import json
+import shlex
 
 from django.test import AsyncClient, override_settings
 
@@ -13,6 +14,7 @@ def _schema_properties(schema, components):
         for branch in schema.get(branch_name, []):
             properties.update(_schema_properties(branch, components))
     return properties
+
 
 @override_settings(
     ROOT_URLCONF="tests.integration.api.urls",
@@ -42,10 +44,7 @@ def test_success_statuses_and_empty_payload_use_the_declared_envelope():
     assert empty.status_code == 200
     assert empty.json()["data"] is None
     assert empty.json()["requestId"] == empty["X-Request-ID"]
-    assert all(
-        "request_id" not in response.json()
-        for response in (success, created, empty)
-    )
+    assert all("request_id" not in response.json() for response in (success, created, empty))
 
 
 @override_settings(
@@ -93,9 +92,7 @@ def test_known_errors_and_route_fallbacks_keep_safe_statuses_and_envelopes():
         assert body["requestId"] == response["X-Request-ID"]
         assert set(body) == {"code", "message", "data", "requestId"}
         assert "PASSWORD-SENTINEL" not in response.content.decode()
-    rate_limited = next(
-        response for response, status, _ in responses if status == 429
-    )
+    rate_limited = next(response for response, status, _ in responses if status == 429)
     assert rate_limited["Retry-After"] == "2"
 
 
@@ -138,10 +135,12 @@ def test_unknown_exception_is_safe_in_both_debug_modes(capsys):
         ):
             assert sentinel not in output
 
-        records = [json.loads(line) for line in output.splitlines()]
-        exception_records = [
-            record for record in records if record["event"] == "request.exception"
+        records = [
+            dict(field.split("=", 1) for field in shlex.split(line))
+            for line in output.splitlines()
+            if line.startswith("timestamp=")
         ]
+        exception_records = [record for record in records if record["event"] == "request.exception"]
         completion_records = [
             record for record in records if record["event"] == "request.completed"
         ]
@@ -152,13 +151,11 @@ def test_unknown_exception_is_safe_in_both_debug_modes(capsys):
         assert exception_record["exceptionType"] == "RuntimeError"
         assert exception_record["requestId"] == response["X-Request-ID"]
         assert completion_record["requestId"] == response["X-Request-ID"]
-        assert completion_record["status"] == 500
+        assert completion_record["status"] == "500"
         assert completion_record["errorCode"] == "INTERNAL_ERROR"
-        assert exception_record["locations"]
-        assert all(
-            set(location) == {"module", "function", "line"}
-            for location in exception_record["locations"]
-        )
+        locations = json.loads(exception_record["locations"])
+        assert locations
+        assert all(set(location) == {"module", "function", "line"} for location in locations)
 
 
 @override_settings(
