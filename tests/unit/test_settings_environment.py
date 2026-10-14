@@ -131,8 +131,8 @@ def test_settings_load_required_values_from_project_dotenv(tmp_path: Path):
     assert settings["database_port"] == "55432"
 
     assert settings["jwt_signing_key"] == _REQUIRED_SETTINGS["JWT_SIGNING_KEY"]
-    assert settings["access_token_lifetime_seconds"] == 600
-    assert settings["refresh_token_lifetime_seconds"] == 604800
+    assert settings["access_token_lifetime_seconds"] == 604800
+    assert settings["refresh_token_lifetime_seconds"] == 2592000
 
 
 def test_settings_work_with_only_process_environment(tmp_path: Path):

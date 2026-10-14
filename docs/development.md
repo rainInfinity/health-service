@@ -428,11 +428,11 @@ curl --include --request POST \
 }
 ```
 
-登出不会撤销已签发的 Access；在其 10 分钟有效期内，只要账号仍可用且渠道匹配，该 Access 仍能访问本人接口。客户端登出后应立即丢弃它；服务端不承诺提前使其失效。其他渠道的独立 Refresh 不受本次登出影响。
+登出不会撤销已签发的 Access；在其 7 天有效期内，只要账号仍可用且渠道匹配，该 Access 仍能访问本人接口。客户端登出后应立即丢弃它；服务端不承诺提前使其失效。其他渠道的独立 Refresh 不受本次登出影响。
 
 ## JWT 密钥和过期令牌维护
 
-Access Token 有效期为 10 分钟，Refresh Token 有效期为 7 天。`JWT_SIGNING_KEY` 与 Django 的 `DJANGO_SECRET_KEY` 分开生成并保存；更换 JWT 密钥会使此前签发的令牌无法通过签名校验。
+Access Token 有效期为 7 天，Refresh Token 有效期为 30 天。`JWT_SIGNING_KEY` 与 Django 的 `DJANGO_SECRET_KEY` 分开生成并保存；更换 JWT 密钥会使此前签发的令牌无法通过签名校验。
 
 启用账号 API 后，旧 Session 不会转换成 JWT。客户端部署新版本后必须重新登录，并安全保存登录响应中的 Access 与 Refresh；后续按接口契约轮换 Refresh。
 

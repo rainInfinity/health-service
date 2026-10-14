@@ -142,8 +142,8 @@ AUTH_USER_MODEL = "health_service.User"
 NINJA_JWT = {
     "SIGNING_KEY": JWT_SIGNING_KEY,
     "AUTH_TOKEN_CLASSES": ("ninja_jwt.tokens.AccessToken",),
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=10),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
 }
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
