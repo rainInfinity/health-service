@@ -2,9 +2,9 @@
 
 ## 范围与命名
 
-本文记录当前讨论确定的业务数据关系及建议的 PostgreSQL 物理模型，不代表 Django 模型和迁移已经实现。业务代码仍属于 Django App `health_service`；通过模型的 `Meta.db_table` 将业务表统一命名为 `health_*`，不修改 Django `AppConfig.label`。Django 自带的认证、权限表不在此命名范围内。
+本文记录已确定的业务数据关系、当前 Django ORM 模型及其迁移对应的 PostgreSQL 物理结构；部署环境是否应用最新结构，以迁移状态为准。业务代码属于 Django App `health_service`；通过模型的 `Meta.db_table` 将业务表统一命名为 `health_*`，不修改 Django `AppConfig.label`。Django 自带的认证、权限表不在此命名范围内。
 
-除共享主键的一对一关系外，主键建议使用 `BIGINT` 自增；时间使用带时区的 `TIMESTAMPTZ`，Django `JSONField` 在 PostgreSQL 中对应 `JSONB`。以下各表列出关键字段的建议类型和空值规则，Django 用户的其他内置字段仍按框架定义。通用审计列单列说明，不在每张业务表的字段表中重复。各模型的具体输出结构仍需按业务契约确定，不将建议值视为已定迁移。
+除共享主键的一对一关系外，主键使用 `BIGINT` 自增；时间使用带时区的 `TIMESTAMPTZ`，Django `JSONField` 在 PostgreSQL 中对应 `JSONB`。以下字段定义以当前模型和迁移为准，Django 用户的其他内置字段仍按框架定义。通用审计列单列说明，不在每张业务表的字段表中重复。模型输出结构按算法契约校验，不要求所有版本使用相同结构。
 
 ## ER 关系模型
 
@@ -153,6 +153,11 @@ erDiagram
 | `failure_code` | 失败代码 | `VARCHAR(64)` | 可空；`FAILED` 时非空，按 `TASK.*`、`INFERENCE.*`、`RESULT.*` 区分失败来源。 |
 | `failure_message` | 失败摘要 | `TEXT` | 可空；可安全对外展示，不直接保存原始异常文本。 |
 | `failure_detail` | 失败详情 | `JSONB` | 可空；保存结构化诊断信息，不保存原始健康数据或异常堆栈。 |
+| `execution_token` | 当前执行令牌 | `UUID` | 可空；每次有效领取生成，只有 `RUNNING` 任务保留。 |
+| `lease_expires_at` | 执行租约到期时间 | `TIMESTAMPTZ` | 可空；与执行令牌成对，仅运行中任务有值。 |
+| `attempt_count` | 有效领取次数 | `INTEGER` | 非空，默认 `0`，不得小于零；只在有效领取时增加。 |
+| `last_dispatched_at` | 最近成功发布时间 | `TIMESTAMPTZ` | 可空；仅在 Redis 消息发布成功后更新，终态可保留。 |
+
 
 ### `health_task_input_file`
 
@@ -183,6 +188,7 @@ erDiagram
 - `health_profile.gender` 限制为 `0`、`1`、`2`；`height_cm`、`weight_kg` 为 `NULL` 或大于零，旧项目的 `0` 身高体重不能原样作为有效测量值导入。
 - `health_task_input_file` 使用条件唯一约束 `(task_id, logical_name) WHERE is_selected = TRUE`；未选中的历史上传可以有多条。文件大小必须大于零，仅将已完整上传的文件登记为有效记录。
 - `health_task` 使用检查约束保证仅 `SUCCEEDED` 状态的任务有非空 `result_payload`，且成功任务必须有结果；`health_task_metric.task_id` 的外键只能保证任务存在，指标行仅属于成功任务由同一事务中的用例保证。
+- `health_task` 的执行租约约束要求 `RUNNING` 任务同时具有 `execution_token` 与 `lease_expires_at`，其他状态二者均为空；`attempt_count` 不得为负数。成功结果约束继续保证仅 `SUCCEEDED` 有 `result_payload`。
 - 任务列表建议使用 `(user_id, created_at DESC)`；渠道切换时批量终止草稿建议使用 `(channel_id, model_version_id, status)`；判断某版本是否仍有已提交或执行中的任务建议使用 `(model_version_id, status)`。实际索引以查询量和执行计划验证后确定。
 - 数值指标的范围筛选和排序建议使用 `health_task_metric(metric_id, numeric_value, task_id)`；布尔指标索引按实际查询负载决定。已知 `metric_id` 时，可直接通过 `task_id` 关联任务做归属、渠道和时间过滤，无需让常用统计查询经过版本指标关联表。结果详情读取 `health_task.result_payload`；任务列表只选摘要字段，不默认读取完整结果或对任意 JSON 路径建立索引。
 
@@ -195,6 +201,8 @@ erDiagram
 任务状态为 `DRAFT → SUBMITTED → RUNNING → SUCCEEDED/FAILED`，草稿也可能直接转为 `FAILED`。草稿不设置过期时间。每个文件通过独立请求上传；草稿中同名文件可重传，新上传记录被选中，旧记录和物理文件永久保留。已提交或失败的任务不允许再上传、替换或重新提交。上传及最终提交锁定任务行，避免提交与最后一次上传交错；文件写入与数据库事务不能视为一个原子操作。
 
 最终提交时依据该版本的输入契约校验所需文件已被选中、渠道仍选择草稿固定的版本，再冻结当时所需的健康资料；年龄等随时间变化的输入以提交时的值进入快照。只有完成上述检查的任务转为 `SUBMITTED`。输入契约由版本元数据还是应用代码维护尚未确定。文件实际内容保存在可配置的本地目录，数据库仅保存相对存储键，不暴露原始文件为公开静态资源。
+
+新增执行字段的迁移须在维护窗口停止旧消费者后执行。迁移会为旧 `RUNNING` 记录分别生成执行令牌并设置已过期租约，使其可由新消费者恢复；不改任务状态、`started_at`、资料快照或历史结果。迁移完成后再启动新消费者。
 
 ### 模型版本切换与回退
 

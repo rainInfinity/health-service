@@ -40,6 +40,32 @@ Django 从项目根目录读取可选的 `.env`，不受启动时工作目录影
 
 `DJANGO_SECRET_KEY`、`JWT_SIGNING_KEY`、`DJANGO_ALLOWED_HOSTS`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES_HOST` 必须显式提供。模板中的 `DJANGO_DEBUG` 默认设为 `true`，未设置时默认为关闭；`POSTGRES_PORT` 未设置时默认为 `5432`。
 
+### 推理服务与本地目录配置
+
+以下变量可由进程环境或项目根目录 `.env` 提供；进程环境优先。相对目录以项目根目录为基准，Web 与消费者必须配置为同一批共享可达的目录。服务启动时会创建目录并检查读写权限。
+
+| 变量 | 默认值 | 约束与用途 |
+|---|---|---|
+| `TASK_DATA_ROOT` | `var/tasks` | 原始任务输入和处理后文件根目录。 |
+| `MODEL_ARTIFACT_ROOT` | `var/model-artifacts` | 模型制品根目录。 |
+| `MAX_UPLOAD_BYTES` | `52428800` | 上传大小上限，必须为正整数，单位字节。 |
+| `REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis 连接；若 URL 含凭证，不得记录到日志。 |
+| `INFERENCE_STREAM` | `health:inference` | Redis Stream 名称，不能为空。 |
+| `INFERENCE_GROUP` | `health-inference` | 消费组名称，不能为空。 |
+| `INFERENCE_LEASE_SECONDS` | `60` | 执行租约时长，正整数秒。 |
+| `INFERENCE_HEARTBEAT_SECONDS` | `10` | 心跳间隔，必须小于租约时长的三分之一。 |
+| `INFERENCE_DISPATCH_INTERVAL_SECONDS` | `30` | 数据库补发间隔，正整数秒。 |
+| `INFERENCE_MAX_ATTEMPTS` | `3` | 有效执行领取次数上限，正整数。 |
+| `INFERENCE_POLL_MILLISECONDS` | `1000` | 消费轮询等待上限，正整数毫秒。 |
+
+所有时长和数量配置必须为正整数；无效值、空队列名称或不可读写的存储目录会使 Django 启动失败。
+
+`TASK_DATA_ROOT` 包含原始健康输入和推理输出，不能配置为公开静态目录；`MODEL_ARTIFACT_ROOT` 保存模型制品。运行 Web 与消费者的操作系统账号都必须对相同目录具备搜索、读取和写入权限。上传写盘与数据库登记不是原子操作；中断或登记回滚可能留下孤儿文件，本地存储不会自动清理旧输入、输出或孤儿文件。只有通过任务记录或成功结果登记的相对键才可由业务读取；输入和输出下载仍须检查账号、来源渠道及成功结果授权。
+
+派发扫描不新增环境变量：每轮最多查询 100 个任务，按主键稳定排序，处理未发布或超过 `INFERENCE_DISPATCH_INTERVAL_SECONDS` 的 `SUBMITTED`，也会重新派发数据库时间判定已过期的 `RUNNING`。Redis 发布失败不更新 `last_dispatched_at`，不消耗执行次数；消息成功但数据库补记失败时允许安全重复派发。
+
+执行领取与续约使用 PostgreSQL 数据库时间。每次有效领取生成新令牌并增加一次 `attempt_count`，只在首次领取时写入 `started_at`；过期后重领保留首次开始时间。达到 `INFERENCE_MAX_ATTEMPTS` 且最后租约过期时，任务以安全失败码 `TASK.RETRY_EXHAUSTED` 终结。暂时 Redis／数据库故障不会直接记为算法失败；消息可重复投递，不承诺恰好一次执行或 Redis 高可用。
+
 ### 仅使用进程环境变量
 
 没有 `.env` 时，也可以在启动 Django 的同一 shell 中提供全部必填配置：
@@ -58,6 +84,8 @@ export POSTGRES_PORT=55432
 
 ## 安装、迁移与启动
 
+升级既有数据库前，应先停止旧推理消费者，并只读检查是否存在旧 `RUNNING` 任务；在维护窗口运行迁移。迁移会为这些任务生成执行令牌并设置已过期租约，保留 `started_at`、输入快照及历史结果，随后由新消费者恢复。不要让新旧消费者在迁移期间并行运行。
+
 ```sh
 uv python install 3.13
 uv sync --locked
@@ -66,10 +94,32 @@ uv run --locked python manage.py migrate
 uv run --locked uvicorn config.asgi:application --app-dir src --host 127.0.0.1 --port 8000 --no-access-log --workers 1
 ```
 
-当前提供五个普通渠道的账号注册、密码登录与本人账号查询；上传、推理业务接口尚未提供。
+当前提供五个普通渠道的账号注册、密码登录与本人账号／健康资料接口；模型目录与版本发布、管理渠道校验及普通渠道可用模型查询见后续章节。
+
+## 独立推理消费者运行与部署
+
+Web 与消费者必须使用同一版本代码、数据库、Redis 配置及共享可达的 `TASK_DATA_ROOT`、`MODEL_ARTIFACT_ROOT`。在项目根目录另开进程运行常驻消费者；每个消费者实例使用不同名称，省略 `--consumer` 时命令会生成主机名、进程号和随机后缀：
+
+```sh
+uv run --locked python manage.py run_inference --consumer local-inference-01
+```
+
+可用单轮模式手动验证或执行一次有界恢复扫描：
+
+```sh
+uv run --locked python manage.py run_inference --consumer manual-recovery --once
+```
+
+每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
+
+消费者遇到数据库或 Redis 故障会停止并报告固定错误，不把基础设施故障记成算法失败。修复依赖后可重新启动；数据库补发扫描会再次驱动仍可执行任务。Redis Stream 不会自动裁剪，可能持续增长；不要手工清空或裁剪仍有待恢复消息的 Stream，部署时应监控 Redis 容量并制定与消息恢复语义兼容的保留策略。
+
+**升级顺序：**先暂停新任务提交并备份数据库及两个文件根目录；停止旧消费者，检查遗留 `RUNNING` 任务；在维护窗口运行迁移；以共享配置启动新 Web 与消费者并确认可用后再开放提交。新旧消费者不得并行运行。**回滚顺序：**先暂停新提交，向消费者发送 SIGTERM 并等待当前安全执行结束，再停止 Web；保留数据库迁移字段、Redis Stream 和文件，不执行破坏性反向迁移或清理。旧版本不具备租约及 Stream 协议时不要启动旧消费者；未完成任务应留待兼容版本恢复。
+
+日志不得包含原始输入、输出内容、完整结果、健康资料快照、文件路径、执行令牌、Access／Refresh Token 或含凭证的 Redis URL。消费者故障定位使用固定错误摘要；不要为排查故障而放宽日志白名单。
 
 ## 账号注册、密码登录与本人账号查询
-普通渠道为 `android-cn`、`ios-cn`、`android-intl`、`ios-intl` 和 `wxapp`；示例中的 `{channel}` 使用其中一个值，`manager` 不开放这些入口。账号是全局共用的，但签发的令牌绑定登录渠道。
+普通渠道为 `android-cn`、`ios-cn`、`android-intl`、`ios-intl` 和 `wxapp`；示例中的 `{channel}` 使用其中一个值。`manager` 只允许已有管理账号登录及访问管理接口，不开放注册。账号是全局共用的，但签发的令牌绑定登录渠道。
 
 注册时提交 `username` 和 `password`：
 
@@ -125,6 +175,188 @@ curl --include \
 
 Access Token 仅适用于签发它的渠道，过期、缺失或无效令牌均不能读取账号。错误响应的结构与统一错误码见下文。
 
+## 管理账号建立与登录
+
+管理账号由受信任的运维人员在 Django shell 中创建，不通过公开注册接口建立。仅授予 `is_staff=True`；除非确有 Django 管理站点需求，不要同时授予 `is_superuser`：
+
+```sh
+uv run --locked python manage.py shell
+```
+
+```python
+from getpass import getpass
+from django.contrib.auth import get_user_model
+
+username = input("管理账号用户名: ")
+password = getpass("管理账号密码: ")
+get_user_model().objects.create_user(
+    username=username,
+    password=password,
+    is_staff=True,
+    is_superuser=False,
+)
+```
+
+使用管理渠道登录，失败时不存在、停用、密码错误或当前无管理权限均返回相同的认证错误：
+
+```sh
+read -r -s -p '管理账号密码: ' MANAGER_PASSWORD; printf '\\n'
+curl --include --request POST \\
+  http://127.0.0.1:8000/api/v1/manager/auth/login \\
+  --header 'Content-Type: application/json' \\
+  --data "{\\"username\\":\\"manager-user\\",\\"password\\":\\"${MANAGER_PASSWORD}\\"}"
+unset MANAGER_PASSWORD
+```
+
+管理接口的每次请求都会重查当前 `is_staff` 权限和管理渠道；撤销权限后，旧管理 Access 立即不能访问管理业务，旧 Refresh 不能轮换。账号仍可用时，用户仍可提交自己的管理 Refresh 登出。普通注册不能提交权限字段，`/api/v1/manager/auth/register` 不存在。
+
+
+## 模型目录与版本发布
+
+管理目录写接口均要求 `manager` 渠道 Access Token，且每次请求都会核对账号当前 `is_staff=True`。普通用户、普通渠道令牌及已撤销管理权限的账号不能写目录。管理账号建立和登录方式见上一节。
+
+管理目录路由为：`POST /manager/models`；`GET`／`POST /manager/models/{model_id}/versions`；`PATCH /manager/model-versions/{version_id}`；`POST /manager/model-versions/{version_id}/artifacts`；`POST /manager/metrics`；`PUT /manager/model-versions/{version_id}/metrics`；`POST /manager/model-versions/{version_id}/publish`；`PUT /manager/channels/{channel}/models/{model_id}/selection`。普通查询为 `GET /{channel}/models`。
+
+`hr_br.example` 是只读取 PPG CSV 并返回样本数、时长和采样率诊断的非临床示例；不接受固定参数，也不需要模型权重制品。正式 `hr_br` 目前只有输入／结果接口模板，没有注册的执行器，不能发布。
+
+以下示例使用已经登录取得的 `MANAGER_ACCESS`。创建模型后从响应的 `data.modelId` 取出 `MODEL_ID`：
+
+```sh
+export API=http://127.0.0.1:8000/api/v1
+export MANAGER_ACCESS='<管理登录响应中的 data.accessToken>'
+
+curl --include --request POST "$API/manager/models" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --header 'Content-Type: application/json' \
+  --data '{"code":"hr-br","name":"HR/BR 示例","description":"非临床输入诊断"}'
+```
+
+使用返回的模型 ID 创建未发布版本，并从 `data.versionId` 取出 `VERSION_ID`：
+
+```sh
+export MODEL_ID='<创建模型返回的 data.modelId>'
+curl --include --request POST "$API/manager/models/$MODEL_ID/versions" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --header 'Content-Type: application/json' \
+  --data '{"version":"1.0.0","algorithmKey":"hr_br.example","params":null}'
+```
+
+创建与算法类型、单位完全一致的指标，再用指标代码设置版本完整投影集合：
+
+```sh
+export VERSION_ID='<创建版本返回的 data.versionId>'
+curl --include --request POST "$API/manager/metrics" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --header 'Content-Type: application/json' \
+  --data '{"code":"example.ppg.sample_count","description":"PPG 样本数","valueType":"number","unit":"samples"}'
+curl --include --request PUT "$API/manager/model-versions/$VERSION_ID/metrics" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --header 'Content-Type: application/json' \
+  --data '{"metricCodes":["example.ppg.sample_count"]}'
+```
+
+发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且文件存在，以及所有已选指标的代码、值类型和单位。示例算法允许零制品；正式版本若声明制品，通过 multipart `logicalName` 与 `file` 上传。发布成功后算法、参数、制品和指标集合不可原地修改；重复发布返回原发布时间。
+
+仅当执行器声明了制品时才上传；`logicalName` 必须与算法契约中的名称完全一致，文件名不会用于构造存储路径：
+
+```sh
+curl --include --request POST "$API/manager/model-versions/$VERSION_ID/artifacts" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --form 'logicalName=weights' \
+  --form 'file=@./weights.bin'
+```
+
+
+```sh
+curl --include --request POST "$API/manager/model-versions/$VERSION_ID/publish" \
+  --header "Authorization: Bearer $MANAGER_ACCESS"
+curl --include --request PUT "$API/manager/channels/ios-cn/models/$MODEL_ID/selection" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --header 'Content-Type: application/json' \
+  --data "{\"versionId\":$VERSION_ID}"
+```
+
+每个已知渠道独立选择本模型的一个已发布版本。同版本重选不改变草稿；切换版本会在同一事务中将该渠道旧版本全部 `DRAFT` 任务标为 `FAILED`／`TASK.MODEL_SWITCHED`，已提交或运行中的任务继续使用固定版本。回退不会恢复已失败草稿。
+
+普通渠道使用与路径匹配的 Access 查询自己已选的目录：
+
+```sh
+curl --include "$API/ios-cn/models?offset=0&limit=20" \
+  --header "Authorization: Bearer <ios-cn 普通用户 Access>"
+```
+
+结果仅包含本渠道当前已发布版本、算法要求的输入逻辑名和 `isExample`，按模型 ID 稳定排序；`offset` 不得为负数，`limit` 范围为 1–100、默认 20。普通响应不包含算法参数、制品存储键或服务器路径。完整路由和字段见 `/api/v1/docs`。
+
+Swagger UI 按「账号认证」「管理端模型管理」「用户端模型目录」「用户端用户与资料」「用户端推理任务与文件」分组。登录、刷新和登出共用 `/{channel}` 路由；在 Apifox 中将 `channel` 设为 `manager` 或目标普通渠道，以匹配令牌的渠道。
+
+## 推理任务草稿、上传、提交与查询
+
+先使用当前普通渠道登录取得 Access，并查询渠道已配置模型及其 `requiredInputs`。创建请求只提交 `modelId`；账号和来源渠道均从令牌确定，客户端不能指定 `userId` 或任意 `versionId`：
+
+```sh
+CHANNEL=ios-cn
+API=http://127.0.0.1:8000/api/v1
+ACCESS_TOKEN='<该渠道登录响应中的 data.accessToken>'
+MODEL_ID='<GET /api/v1/ios-cn/models 返回的 data.items[].modelId>'
+
+curl --include --request POST "$API/$CHANNEL/tasks" \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "{\"modelId\":$MODEL_ID}"
+```
+
+创建成功返回 HTTP 201 和 `taskId`、固定模型版本、`status: DRAFT` 及 `isExample`。未配置给当前渠道的模型不能创建草稿；请求额外包含 `userId`、`versionId` 或权限字段会被拒绝。
+
+只可向本人当前渠道的 `DRAFT` 上传算法声明的逻辑输入名。请求使用 multipart 的 `logicalName` 和 `file`；文件完整写入后才登记为当前选择：
+
+```sh
+TASK_ID='<创建响应中的 data.taskId>'
+curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/files" \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --form 'logicalName=ppg' \
+  --form 'file=@docs/examples/hr-br/ppg.csv'
+```
+
+逻辑名必须来自模型目录返回的算法输入契约，例如示例算法使用 `ppg`。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
+
+最终提交不接收请求体：
+
+```sh
+curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/submit" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+提交返回 HTTP 200 和 `SUBMITTED` 摘要。服务按“渠道 → 当前版本选择 → 任务 → 用户 → 资料”加锁，检查固定版本仍是当前选择、算法要求的每个输入都已选中且实际文件可读，再冻结当前完整资料和提交日期对应的 `age_years`。缺少资料或出生日期时不创建资料记录，年龄保持 `null`；未知病史键继续缺席，不填默认值。提交阶段只验证逻辑文件齐全和可读，不解析 CSV 或提前执行算法资料校验；算法必需资料在消费者运行时依固定版本契约检查。
+
+任务列表采用创建时间、任务 ID 稳定倒序；`offset` 必须非负，`limit` 为 1–100、默认 20。列表只返回状态、固定版本、示例标志和业务时间，不加载完整结果或资料快照：
+
+```sh
+curl --include "$API/$CHANNEL/tasks?offset=0&limit=20" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+curl --include "$API/$CHANNEL/tasks/$TASK_ID" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+详情对 `SUCCEEDED` 返回数据库保存的完整权威 `result`，不会重新运行算法或从指标行重组结果；对 `FAILED` 只返回安全 `failureCode`、`failureMessage` 和完成时间，不返回 `failure_detail`、资料快照、原始输入或本地绝对路径。查询、上传、提交及下载都同时按账号及任务来源渠道授权；跨账号或跨来源渠道的任务返回 404。重复提交及不允许的状态变更返回冲突，任务不能由用户重置或改写固定版本。
+
+### 下载当前或历史输入及成功输出
+
+上传响应中的 `fileId` 可用于下载本人任务的当前或历史输入；同名重传不会删除旧文件。成功任务 `result.output_files` 的逻辑名可用于下载处理后文件。两类下载都要求 Access Token 的渠道与路径一致，并同时匹配任务所属账号和来源渠道；管理令牌不能绕过此归属检查。输出仅在任务为 `SUCCEEDED` 且该逻辑名已进入权威结果时可下载。请求不接受存储键或本地路径：
+
+```sh
+FILE_ID='<上传响应中的 fileId>'
+curl --fail --show-error --output ./input-history.csv \
+  "$API/$CHANNEL/tasks/$TASK_ID/files/$FILE_ID/download" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+
+OUTPUT_NAME='<成功结果 result.output_files 中的逻辑名>'
+curl --fail --show-error --output ./result-output.bin \
+  "$API/$CHANNEL/tasks/$TASK_ID/outputs/$OUTPUT_NAME/download" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+成功下载返回 `FileResponse` 原始文件字节，不使用 JSON 业务包装；令牌渠道与请求路径不一致返回 403，任务账号或来源渠道不匹配、未知文件或逻辑名、缺失物理文件及失败／失租输出返回安全 404，不暴露存储路径。没有已登记 `output_files` 的成功结果不提供输出下载。
+
 ## 本人健康资料读取与部分更新
 
 资料接口只从当前渠道的 Access 确定账号，不接受请求指定 `userId`。`GET /api/v1/<channel>/users/me/profile` 不创建缺失的 Profile；未填写值返回 `null`，性别以 `0` 表示未知：
@@ -163,7 +395,7 @@ curl --include --request PATCH \
 
 ## Refresh 轮换与登出
 
-刷新和登出只在请求体中接收当前渠道的 `refreshToken`，不要求有效 Access；不要把 Refresh 放入 `Authorization` 头。成功刷新返回 HTTP 200，`data` 使用与登录相同的 `accessToken`、`refreshToken` 字段：
+普通和管理渠道的刷新、登出只在请求体中接收当前渠道的 `refreshToken`，不要求有效 Access；不要把 Refresh 放入 `Authorization` 头。管理 Refresh 轮换时还会重新检查账号当前管理权限；撤权后仍允许独立登出。成功刷新返回 HTTP 200，`data` 使用与登录相同的 `accessToken`、`refreshToken` 字段：
 
 ```sh
 REFRESH_TOKEN='<从最近一次成功响应的 data.refreshToken 复制>'
