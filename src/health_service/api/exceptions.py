@@ -12,6 +12,18 @@ from ninja.errors import ValidationError as NinjaValidationError
 from ninja_extra import NinjaExtraAPI
 from ninja_extra import exceptions as ninja_extra_exceptions
 
+from health_service.application.catalog_exceptions import (
+    CatalogConfigurationInvalid,
+    CatalogConflict,
+    CatalogNotFound,
+)
+from health_service.application.task_exceptions import (
+    InvalidTaskPagination,
+    TaskConflict,
+    TaskInputInvalid,
+    TaskNotFound,
+)
+
 from .request_context import require_request_context, update_request_metadata
 from .responses import error_response
 from .structured_logging import log_unexpected_exception
@@ -83,6 +95,19 @@ def register_exception_handlers(api: NinjaExtraAPI) -> None:
     api.add_exception_handler(DjangoValidationError, _handle_validation_error)
     api.add_exception_handler(PermissionDenied, _handle_permission_denied)
     api.add_exception_handler(Http404, _handle_not_found)
+    api.add_exception_handler(CatalogNotFound, _handle_catalog_not_found)
+    api.add_exception_handler(CatalogConflict, _handle_catalog_conflict)
+    api.add_exception_handler(
+        CatalogConfigurationInvalid,
+        _handle_catalog_configuration_invalid,
+    )
+    api.add_exception_handler(TaskNotFound, _handle_task_not_found)
+    api.add_exception_handler(TaskConflict, _handle_task_conflict)
+    api.add_exception_handler(TaskInputInvalid, _handle_task_input_invalid)
+    api.add_exception_handler(
+        InvalidTaskPagination,
+        _handle_invalid_task_pagination,
+    )
     api.add_exception_handler(HttpError, _handle_http_error)
     api.add_exception_handler(
         ninja_extra_exceptions.APIException, _handle_extra_api_exception
@@ -108,6 +133,62 @@ def _handle_permission_denied(
 
 def _handle_not_found(request: HttpRequest, exception: Http404) -> HttpResponse:
     return error_for_code(request, ApiErrorCode.NOT_FOUND)
+
+
+def _handle_catalog_not_found(
+    request: HttpRequest,
+    exception: CatalogNotFound,
+) -> HttpResponse:
+    """将目录资源缺失映射为统一 404 响应。"""
+    return error_for_code(request, ApiErrorCode.NOT_FOUND)
+
+
+def _handle_catalog_conflict(
+    request: HttpRequest,
+    exception: CatalogConflict,
+) -> HttpResponse:
+    """将目录唯一性或不可变冲突映射为统一 409 响应。"""
+    return error_for_code(request, ApiErrorCode.CONFLICT)
+
+
+def _handle_catalog_configuration_invalid(
+    request: HttpRequest,
+    exception: CatalogConfigurationInvalid,
+) -> HttpResponse:
+    """将无效目录配置映射为统一 422 响应。"""
+    return error_for_code(request, ApiErrorCode.INVALID_INPUT)
+
+
+def _handle_task_not_found(
+    request: HttpRequest,
+    exception: TaskNotFound,
+) -> HttpResponse:
+    """将账号或渠道不匹配的任务查询映射为统一 404 响应。"""
+    return error_for_code(request, ApiErrorCode.NOT_FOUND)
+
+
+def _handle_task_conflict(
+    request: HttpRequest,
+    exception: TaskConflict,
+) -> HttpResponse:
+    """将任务状态冲突映射为统一 409 响应。"""
+    return error_for_code(request, ApiErrorCode.CONFLICT)
+
+
+def _handle_task_input_invalid(
+    request: HttpRequest,
+    exception: TaskInputInvalid,
+) -> HttpResponse:
+    """将不符合任务输入契约的请求映射为统一 422 响应。"""
+    return error_for_code(request, ApiErrorCode.INVALID_INPUT)
+
+
+def _handle_invalid_task_pagination(
+    request: HttpRequest,
+    exception: InvalidTaskPagination,
+) -> HttpResponse:
+    """将越界任务分页映射为统一 422 响应。"""
+    return error_for_code(request, ApiErrorCode.INVALID_INPUT)
 
 
 def _handle_http_error(request: HttpRequest, exception: HttpError) -> HttpResponse:

@@ -1,7 +1,11 @@
+"""验证任务状态和执行租约的数据库约束。"""
+
+import uuid
+
+import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-import pytest
 
 from health_service.models import Channel, Model, ModelVersion, Task
 
@@ -31,7 +35,89 @@ def test_draft_task_allows_missing_snapshot_and_business_times():
     assert task.submitted_at is None
     assert task.started_at is None
     assert task.finished_at is None
+    assert task.execution_token is None
+    assert task.lease_expires_at is None
+    assert task.attempt_count == 0
+    assert task.last_dispatched_at is None
 
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("execution_token", "lease_expires_at"),
+    [
+        (None, None),
+        (uuid.uuid4(), None),
+        (None, timezone.now()),
+    ],
+)
+def test_running_task_requires_an_execution_token_and_lease(
+    execution_token, lease_expires_at
+):
+    """验证运行中任务必须同时保存执行令牌和租约。"""
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            _create_task(
+                prefix="running-without-lease",
+                status=Task.StatusChoices.RUNNING,
+                execution_token=execution_token,
+                lease_expires_at=lease_expires_at,
+            )
+
+
+@pytest.mark.django_db
+def test_running_task_accepts_a_paired_execution_token_and_lease():
+    """验证运行中任务可保存成对执行权字段。"""
+    token = uuid.uuid4()
+    expires_at = timezone.now()
+
+    task = _create_task(
+        prefix="running-with-lease",
+        status=Task.StatusChoices.RUNNING,
+        execution_token=token,
+        lease_expires_at=expires_at,
+        attempt_count=1,
+    )
+
+    assert task.execution_token == token
+    assert task.lease_expires_at == expires_at
+    assert task.attempt_count == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("status", "field"),
+    [
+        (Task.StatusChoices.SUCCEEDED, "execution_token"),
+        (Task.StatusChoices.SUCCEEDED, "lease_expires_at"),
+        (Task.StatusChoices.FAILED, "execution_token"),
+        (Task.StatusChoices.FAILED, "lease_expires_at"),
+    ],
+)
+def test_terminal_task_rejects_execution_ownership(status, field):
+    """验证成功或失败终态不能残留执行令牌或租约。"""
+    fields = {
+        "status": status,
+        field: uuid.uuid4() if field == "execution_token" else timezone.now(),
+    }
+    if status == Task.StatusChoices.SUCCEEDED:
+        fields.update(result_payload={"value": 1}, finished_at=timezone.now())
+    else:
+        fields.update(failure_code="TASK.ERROR", finished_at=timezone.now())
+
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            _create_task(
+                prefix=f"terminal-with-lease-{status}-{field}",
+                **fields,
+            )
+
+
+@pytest.mark.django_db
+def test_task_rejects_negative_attempt_count():
+    """验证数据库拒绝负执行领取次数。"""
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            _create_task(prefix="negative-attempt-count", attempt_count=-1)
 
 @pytest.mark.django_db
 def test_success_requires_result_and_completion_time():

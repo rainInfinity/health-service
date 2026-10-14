@@ -4,6 +4,7 @@ from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 
+from health_service.domain.channels import ChannelLabel
 from health_service.infrastructure.auth.tokens import (
     InvalidRefreshTokenError,
     IssuedTokenPair,
@@ -48,11 +49,13 @@ def register_user(*, username: str, password: str) -> AccountSummary:
 
 
 def login_user(*, username: str, password: str, channel: str) -> IssuedTokenPair:
-    """验证账号可用状态，并签发绑定当前渠道的令牌对。"""
+    """验证账号可用状态及管理权限，并签发绑定当前渠道的令牌对。"""
     user_model = get_user_model()
     normalized_username = user_model.normalize_username(username)
     user = authenticate(username=normalized_username, password=password)
-    if user is None:
+    if user is None or (
+        channel == ChannelLabel.MANAGER.value and not user.is_staff
+    ):
         raise InvalidCredentials
     return issue_token_pair(user, channel)
 

@@ -10,6 +10,8 @@ from ninja_jwt.settings import api_settings
 from ninja_jwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from ninja_jwt.tokens import RefreshToken
 
+from health_service.domain.channels import ChannelLabel
+
 
 @dataclass(frozen=True, slots=True)
 class IssuedTokenPair:
@@ -99,6 +101,8 @@ def rotate_refresh_token(raw_token: str, channel: str) -> IssuedTokenPair:
     refresh = _validated_refresh_token(raw_token)
     with transaction.atomic():
         user, outstanding = _lock_active_refresh_owner(refresh, channel)
+        if channel == ChannelLabel.MANAGER.value and not user.is_staff:
+            raise InvalidRefreshTokenError
         _blacklist_locked_refresh(outstanding)
         return issue_token_pair(user, channel)
 

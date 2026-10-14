@@ -19,6 +19,63 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _nonempty_env(name: str, default: str) -> str:
+    """读取非空配置，并去除首尾空白。"""
+    value = os.environ.get(name, default).strip()
+    if not value:
+        raise ImproperlyConfigured(f"{name} must not be empty")
+    return value
+
+
+def _positive_integer_env(name: str, default: int) -> int:
+    """读取严格为正整数的环境配置。"""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError as error:
+        raise ImproperlyConfigured(f"{name} must be a positive integer") from error
+    if value <= 0:
+        raise ImproperlyConfigured(f"{name} must be a positive integer")
+    return value
+
+
+def _configured_directory(name: str, default: str) -> Path:
+    """解析并验证项目可读写的本地目录配置。"""
+    value = _nonempty_env(name, default)
+    configured = Path(value)
+    directory = configured if configured.is_absolute() else PROJECT_ROOT / configured
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ImproperlyConfigured(f"{name} must be a writable directory") from error
+    if not directory.is_dir() or not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
+        raise ImproperlyConfigured(f"{name} must be a writable directory")
+    return directory
+
+
+LOG_DIR = _configured_directory("LOG_DIR", "logs")
+TASK_DATA_ROOT = _configured_directory("TASK_DATA_ROOT", "var/tasks")
+MODEL_ARTIFACT_ROOT = _configured_directory("MODEL_ARTIFACT_ROOT", "var/model-artifacts")
+
+MAX_UPLOAD_BYTES = _positive_integer_env("MAX_UPLOAD_BYTES", 52_428_800)
+REDIS_URL = _nonempty_env("REDIS_URL", "redis://127.0.0.1:6379/0")
+INFERENCE_STREAM = _nonempty_env("INFERENCE_STREAM", "health:inference")
+INFERENCE_GROUP = _nonempty_env("INFERENCE_GROUP", "health-inference")
+INFERENCE_LEASE_SECONDS = _positive_integer_env("INFERENCE_LEASE_SECONDS", 60)
+INFERENCE_HEARTBEAT_SECONDS = _positive_integer_env("INFERENCE_HEARTBEAT_SECONDS", 10)
+INFERENCE_DISPATCH_INTERVAL_SECONDS = _positive_integer_env(
+    "INFERENCE_DISPATCH_INTERVAL_SECONDS",
+    30,
+)
+INFERENCE_MAX_ATTEMPTS = _positive_integer_env("INFERENCE_MAX_ATTEMPTS", 3)
+INFERENCE_POLL_MILLISECONDS = _positive_integer_env("INFERENCE_POLL_MILLISECONDS", 1000)
+
+if INFERENCE_HEARTBEAT_SECONDS * 3 >= INFERENCE_LEASE_SECONDS:
+    raise ImproperlyConfigured(
+        "INFERENCE_HEARTBEAT_SECONDS must be less than one third of INFERENCE_LEASE_SECONDS"
+    )
+
+
+
 SECRET_KEY = _required_env("DJANGO_SECRET_KEY")
 JWT_SIGNING_KEY = _required_env("JWT_SIGNING_KEY")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").casefold() in {"1", "true", "yes", "on"}
@@ -28,23 +85,6 @@ ALLOWED_HOSTS = [
 if not ALLOWED_HOSTS:
     raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS must contain at least one host")
 
-_log_dir_value = os.environ.get("LOG_DIR", "logs")
-if not _log_dir_value.strip():
-    raise ImproperlyConfigured("LOG_DIR must not be empty")
-
-_configured_log_dir = Path(_log_dir_value)
-LOG_DIR = (
-    _configured_log_dir if _configured_log_dir.is_absolute() else PROJECT_ROOT / _configured_log_dir
-)
-try:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-except OSError as error:
-    raise ImproperlyConfigured("LOG_DIR must be a writable directory") from error
-if not LOG_DIR.is_dir() or not os.access(
-    LOG_DIR,
-    os.R_OK | os.W_OK | os.X_OK,
-):
-    raise ImproperlyConfigured("LOG_DIR must be a writable directory")
 
 INSTALLED_APPS = [
     "django.contrib.admin",

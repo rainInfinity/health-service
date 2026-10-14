@@ -27,10 +27,10 @@ from health_service.schemas.responses.accounts import (
     UserPublicResponse,
 )
 
-from .common import require_ordinary_channel
+from .common import require_auth_channel, require_ordinary_channel
 from .contracts import ERROR_RESPONSES
 
-router = Router()
+router = Router(tags=["账号认证"])
 
 
 @router.post(
@@ -63,7 +63,7 @@ async def register(request: HttpRequest, channel: str, body: AccountCredentialsR
 )
 async def login(request: HttpRequest, channel: str, body: AccountCredentialsRequest):
     """验证密码并签发只适用于当前渠道的双 Token。"""
-    require_ordinary_channel(channel)
+    require_auth_channel(channel)
     request.api_channel = channel
     try:
         tokens = await sync_to_async(login_user, thread_sensitive=True)(
@@ -89,7 +89,7 @@ async def login(request: HttpRequest, channel: str, body: AccountCredentialsRequ
 )
 async def refresh(request: HttpRequest, channel: str, body: RefreshTokenRequest):
     """原子轮换当前渠道的 Refresh 并返回新令牌对。"""
-    require_ordinary_channel(channel)
+    require_auth_channel(channel)
     request.api_channel = channel
     try:
         tokens = await sync_to_async(refresh_user_tokens, thread_sensitive=True)(
@@ -116,7 +116,7 @@ async def refresh(request: HttpRequest, channel: str, body: RefreshTokenRequest)
 )
 async def logout(request: HttpRequest, channel: str, body: RefreshTokenRequest):
     """只撤销请求渠道当前提交的 Refresh。"""
-    require_ordinary_channel(channel)
+    require_auth_channel(channel)
     request.api_channel = channel
     try:
         await sync_to_async(logout_user, thread_sensitive=True)(

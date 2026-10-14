@@ -17,7 +17,7 @@ from health_service.schemas.responses.profiles import (
 from .common import require_authenticated_channel
 from .contracts import ERROR_RESPONSES
 
-router = Router()
+router = Router(tags=["用户端用户与资料"])
 
 
 

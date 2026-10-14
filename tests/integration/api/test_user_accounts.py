@@ -357,6 +357,91 @@ def test_login_failures_have_the_same_public_credentials_error():
     ] * 3
     assert all(response.json()["data"] is None for response in (missing, incorrect, inactive))
 
+@pytest.mark.django_db(transaction=True)
+def test_manager_login_requires_staff_and_uses_manager_channel_tokens():
+    """验证只有可用管理账号能登录管理渠道且失败信息一致。"""
+    user_model = get_user_model()
+    manager = user_model.objects.create_user(
+        username="manager-login-user",
+        password="Cobalt-forest-824!strong",
+        is_staff=True,
+        is_superuser=False,
+    )
+    ordinary = user_model.objects.create_user(
+        username="ordinary-manager-login-user",
+        password="Cobalt-forest-824!strong",
+    )
+    inactive_manager = user_model.objects.create_user(
+        username="inactive-manager-login-user",
+        password="Cobalt-forest-824!strong",
+        is_staff=True,
+        is_superuser=False,
+        is_active=False,
+    )
+
+    async def send_requests():
+        client = AsyncClient()
+        responses = (
+            await _login(
+                client,
+                "manager",
+                {"username": manager.username, "password": "Cobalt-forest-824!strong"},
+            ),
+            await _login(
+                client,
+                "manager",
+                {"username": ordinary.username, "password": "Cobalt-forest-824!strong"},
+            ),
+            await _login(
+                client,
+                "manager",
+                {"username": ordinary.username, "password": "incorrect-password"},
+            ),
+            await _login(
+                client,
+                "manager",
+                {"username": "missing-manager-login-user", "password": "Cobalt-forest-824!strong"},
+            ),
+            await _login(
+                client,
+                "manager",
+                {"username": inactive_manager.username, "password": "Cobalt-forest-824!strong"},
+            ),
+            await _login(
+                client,
+                "android-cn",
+                {"username": manager.username, "password": "Cobalt-forest-824!strong"},
+            ),
+        )
+        await _close_worker_database_connection()
+        return responses
+
+    (
+        manager_login,
+        ordinary_denied,
+        bad_password,
+        missing_user,
+        inactive_denied,
+        manager_ordinary_login,
+    ) = asyncio.run(send_requests())
+
+    assert manager_login.status_code == 200
+    assert manager_login.json()["code"] == "OK"
+    manager_pair = manager_login.json()["data"]
+    assert AccessToken(manager_pair["accessToken"])["channel"] == "manager"
+    assert RefreshToken(manager_pair["refreshToken"])["channel"] == "manager"
+    assert manager_ordinary_login.status_code == 200
+    assert AccessToken(manager_ordinary_login.json()["data"]["accessToken"])["channel"] == "android-cn"
+
+    failures = (ordinary_denied, bad_password, missing_user, inactive_denied)
+    assert [response.status_code for response in failures] == [401] * 4
+    assert [response.json()["code"] for response in failures] == ["INVALID_CREDENTIALS"] * 4
+    assert [response.json()["message"] for response in failures] == ["用户名或密码错误"] * 4
+    assert all(response.json()["data"] is None for response in failures)
+    assert get_user_model().objects.get(pk=ordinary.pk).is_staff is False
+    assert OutstandingToken.objects.filter(user_id=manager.pk).count() == 2
+    assert not OutstandingToken.objects.filter(user_id=ordinary.pk).exists()
+
 
 @pytest.mark.django_db(transaction=True)
 def test_refresh_rotates_once_and_rejects_replay_wrong_channel_and_inactive_user():
@@ -431,15 +516,76 @@ def test_refresh_rotates_once_and_rejects_replay_wrong_channel_and_inactive_user
     assert inactive.json()["code"] == "INVALID_TOKEN"
     assert OutstandingToken.objects.count() == token_count_before_inactive_attempt
 
+@pytest.mark.django_db(transaction=True)
+def test_manager_refresh_rechecks_staff_but_logout_remains_available():
+    """验证撤销管理权限阻止刷新但仍允许本人撤销管理 Refresh。"""
+    user = get_user_model().objects.create_user(
+        username="manager-refresh-user",
+        password="Cedar-orbit-349!strong",
+        is_staff=True,
+        is_superuser=False,
+    )
+    manager_pair = issue_token_pair(user, "manager")
+    other_manager_pair = issue_token_pair(user, "manager")
+    ordinary_pair = issue_token_pair(user, "android-cn")
+    manager_jti = RefreshToken(manager_pair.refresh_token)["jti"]
+    other_manager_jti = RefreshToken(other_manager_pair.refresh_token)["jti"]
+
+    async def check_channel_isolation():
+        client = AsyncClient()
+        responses = (
+            await _refresh(client, "android-cn", manager_pair.refresh_token),
+            await _refresh(client, "manager", ordinary_pair.refresh_token),
+            await _logout(client, "android-cn", manager_pair.refresh_token),
+            await _logout(client, "manager", ordinary_pair.refresh_token),
+        )
+        await _close_worker_database_connection()
+        return responses
+
+    wrong_channel_responses = asyncio.run(check_channel_isolation())
+    assert [response.status_code for response in wrong_channel_responses] == [403] * 4
+    assert [response.json()["code"] for response in wrong_channel_responses] == [
+        "CHANNEL_FORBIDDEN"
+    ] * 4
+
+    user.is_staff = False
+    user.save(update_fields={"is_staff"})
+
+    async def revoke_and_refresh():
+        client = AsyncClient()
+        denied_refresh = await _refresh(client, "manager", manager_pair.refresh_token)
+        logout = await _logout(client, "manager", manager_pair.refresh_token)
+        ordinary_refresh = await _refresh(client, "android-cn", ordinary_pair.refresh_token)
+        await _close_worker_database_connection()
+        return denied_refresh, logout, ordinary_refresh
+
+    denied_refresh, logout, ordinary_refresh = asyncio.run(revoke_and_refresh())
+
+    assert denied_refresh.status_code == 401
+    assert denied_refresh.json()["code"] == "INVALID_TOKEN"
+    assert logout.status_code == 200
+    assert BlacklistedToken.objects.filter(token__jti=manager_jti).exists()
+    assert not BlacklistedToken.objects.filter(token__jti=other_manager_jti).exists()
+    assert ordinary_refresh.status_code == 200
+    assert AccessToken(ordinary_refresh.json()["data"]["accessToken"])["channel"] == "android-cn"
+
+
+
+@pytest.mark.parametrize(
+    ("channel", "is_staff"),
+    [("ios-cn", False), ("manager", True)],
+)
 
 @pytest.mark.django_db(transaction=True)
-def test_concurrent_refresh_requests_rotate_one_old_jti_once():
-    """用两个 PostgreSQL 连接并发刷新同一 jti，确认只有一个事务成功。"""
+def test_concurrent_refresh_requests_rotate_one_old_jti_once(channel: str, is_staff: bool):
+    """用两个 PostgreSQL 连接并发刷新，确认普通与管理令牌均只轮换一次。"""
     user = get_user_model().objects.create_user(
         username="refresh-concurrency-user",
         password="Indigo-river-951!strong",
+        is_staff=is_staff,
+        is_superuser=False,
     )
-    issued = issue_token_pair(user, "ios-cn")
+    issued = issue_token_pair(user, channel)
     old_jti = RefreshToken(issued.refresh_token)["jti"]
     barrier = Barrier(2)
 
@@ -451,7 +597,7 @@ def test_concurrent_refresh_requests_rotate_one_old_jti_once():
             try:
                 refresh_user_tokens(
                     raw_token=issued.refresh_token,
-                    channel="ios-cn",
+                    channel=channel,
                 )
             except InvalidRefreshToken:
                 return "rejected"

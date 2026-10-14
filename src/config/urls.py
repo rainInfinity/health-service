@@ -6,6 +6,8 @@ from ninja_extra import NinjaExtraAPI
 
 from health_service.api.exceptions import register_exception_handlers
 from health_service.api.v1.auth import router as account_auth_router
+from health_service.api.v1.catalog import router as catalog_router
+from health_service.api.v1.tasks import router as task_router
 from health_service.api.v1.users import router as account_users_router
 
 json_renderer = JSONRenderer()
@@ -14,5 +16,7 @@ api = NinjaExtraAPI(title="健康服务 API", version="1.0.0", renderer=json_ren
 register_exception_handlers(api)
 api.add_router("", account_auth_router)
 api.add_router("", account_users_router)
+api.add_router("", catalog_router)
+api.add_router("", task_router)
 
 urlpatterns = [path("api/v1/", api.urls)]

@@ -64,6 +64,25 @@ class Task(AuditModel):
         blank=True,
         db_comment="结构化失败诊断详情",
     )
+    execution_token = models.UUIDField(
+        null=True,
+        blank=True,
+        db_comment="当前执行权令牌",
+    )
+    lease_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_comment="执行租约到期时间",
+    )
+    attempt_count = models.PositiveIntegerField(
+        default=0,
+        db_comment="有效执行领取次数",
+    )
+    last_dispatched_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_comment="最近一次成功消息发布时间",
+    )
 
     class Meta:
         db_table = "health_task"
@@ -113,6 +132,25 @@ class Task(AuditModel):
                     )
                 ),
                 name="health_task_failure_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        status="RUNNING",
+                        execution_token__isnull=False,
+                        lease_expires_at__isnull=False,
+                    )
+                    | models.Q(
+                        status__in=["DRAFT", "SUBMITTED", "SUCCEEDED", "FAILED"],
+                        execution_token__isnull=True,
+                        lease_expires_at__isnull=True,
+                    )
+                ),
+                name="health_task_execution_lease_consistent",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(attempt_count__gte=0),
+                name="health_task_attempt_count_nonnegative",
             ),
         ]
         indexes = [
