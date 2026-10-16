@@ -80,6 +80,8 @@ def _run_settings(
         not in {
             "LOG_DIR",
             "JWT_SIGNING_KEY",
+            "JWT_ACCESS_TOKEN_LIFETIME_SECONDS",
+            "JWT_REFRESH_TOKEN_LIFETIME_SECONDS",
             "TASK_DATA_ROOT",
             "MODEL_ARTIFACT_ROOT",
             "MAX_UPLOAD_BYTES",
@@ -388,6 +390,40 @@ def test_heartbeat_must_be_less_than_one_third_of_lease(tmp_path: Path):
 
     assert process.returncode != 0
     assert "less than one third" in process.stderr
+
+
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [
+        ("JWT_ACCESS_TOKEN_LIFETIME_SECONDS", "access_token_lifetime_seconds"),
+        ("JWT_REFRESH_TOKEN_LIFETIME_SECONDS", "refresh_token_lifetime_seconds"),
+    ],
+)
+def test_token_lifetimes_load_independently_and_process_overrides_file(tmp_path, name, field):
+    """独立的 Token 期限沿用 dotenv 与进程优先级，不要求另一项配置。"""
+    project_root = _isolated_project(tmp_path)
+    (project_root / ".env").write_text(
+        _dotenv_content({**_REQUIRED_SETTINGS, name: "1800"}), encoding="utf-8",
+    )
+    loaded = _settings_output(_run_settings(project_root, project_root))
+    assert loaded[field] == 1800
+    overridden = _settings_output(_run_settings(project_root, project_root, {name: "900"}))
+    assert overridden[field] == 900
+
+
+@pytest.mark.parametrize(
+    "name", ["JWT_ACCESS_TOKEN_LIFETIME_SECONDS", "JWT_REFRESH_TOKEN_LIFETIME_SECONDS"],
+)
+@pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "invalid"])
+def test_invalid_token_lifetime_cannot_fall_back_to_file(tmp_path, name, value):
+    """显式非法进程值必须失败，即使文件中存在合法期限。"""
+    project_root = _isolated_project(tmp_path)
+    (project_root / ".env").write_text(
+        _dotenv_content({**_REQUIRED_SETTINGS, name: "1800"}), encoding="utf-8",
+    )
+    process = _run_settings(project_root, project_root, {name: value})
+    assert process.returncode != 0
+    assert f"{name} must be a positive integer" in process.stderr
 
 
 @pytest.mark.parametrize("name", ["TASK_DATA_ROOT", "MODEL_ARTIFACT_ROOT"])
