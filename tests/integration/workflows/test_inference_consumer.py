@@ -30,6 +30,7 @@ from health_service.infrastructure.inference_adapter import (
 from health_service.infrastructure.storage import LocalFileStorage, StorageArea
 from health_service.management.commands import run_inference as inference_command
 from health_service.models import Channel, Task, TaskInputFile, TaskMetric
+from tests.log_records import parse_console_records
 
 _PPG_CSV = (
     "timestampFrame,avgR,avgG,avgB\n"
@@ -155,7 +156,7 @@ def _run_once(consumer: str = "test-consumer") -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_once_dispatches_and_executes_example_task(tmp_path, inference_stream):
+def test_once_dispatches_and_executes_example_task(tmp_path, inference_stream, capsys):
     """单轮命令补发并完成示例任务，原子保存完整结果和所选指标。"""
     client, stream, group = inference_stream
     with override_settings(
@@ -176,16 +177,29 @@ def test_once_dispatches_and_executes_example_task(tmp_path, inference_stream):
     assert all(key not in task.result_payload for key in ("hr", "br"))
     assert TaskMetric.objects.filter(task=task).count() == 3
     assert client.xpending(stream, group)["pending"] == 0
+    records = parse_console_records(capsys.readouterr().out)
+    assert [record["event"] for record in records] == [
+        "inference.worker.starting", "inference.worker.ready",
+        "inference.message.received", "inference.task.started",
+        "inference.task.succeeded", "inference.worker.stopped",
+    ]
+    task_records = [record for record in records if "taskId" in record]
+    assert all(record["taskId"] == str(task.pk) for record in task_records)
+    assert len({record["messageId"] for record in task_records}) == 1
+    assert float(records[-2]["durationMs"]) >= 0
 
 
 @pytest.mark.django_db(transaction=True)
-def test_once_exits_immediately_when_stream_has_no_messages(inference_stream):
+def test_once_exits_immediately_when_stream_has_no_messages(inference_stream, capsys):
     """空闲 Stream 的单轮命令立即返回且不制造任务消息。"""
     client, stream, _ = inference_stream
 
     _run_once()
 
     assert client.xrange(stream) == []
+    assert [record["event"] for record in parse_console_records(capsys.readouterr().out)] == [
+        "inference.worker.starting", "inference.worker.ready", "inference.worker.stopped",
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -201,7 +215,7 @@ def test_once_reuses_existing_consumer_group(inference_stream):
 
 @pytest.mark.django_db(transaction=True)
 def test_once_acknowledges_terminal_malformed_and_missing_task_messages(
-    tmp_path, inference_stream
+    tmp_path, inference_stream, capsys
 ):
     """终态、畸形和不存在任务的消息安全确认且不改写结果。"""
     client, stream, group = inference_stream
@@ -228,11 +242,14 @@ def test_once_acknowledges_terminal_malformed_and_missing_task_messages(
     assert task.status == Task.StatusChoices.SUCCEEDED
     assert task.result_payload == saved_result
     assert client.xpending(stream, group)["pending"] == 0
+    records = parse_console_records(capsys.readouterr().out)
+    assert all(record["event"] != "inference.task.started" for record in records)
+    assert "not-an-id" not in str(records)
 
 
 @pytest.mark.django_db(transaction=True)
 def test_once_leaves_message_pending_while_database_lease_is_active(
-    tmp_path, inference_stream
+    tmp_path, inference_stream, capsys
 ):
     """已有有效执行租约时不重领任务，也不确认其消息。"""
     client, stream, group = inference_stream
@@ -259,6 +276,9 @@ def test_once_leaves_message_pending_while_database_lease_is_active(
     assert task.status == Task.StatusChoices.RUNNING
     assert task.execution_token == execution_token
     assert client.xpending(stream, group)["pending"] == 1
+    records = parse_console_records(capsys.readouterr().out)
+    assert any(record["event"] == "inference.message.received" for record in records)
+    assert all(record["event"] != "inference.task.started" for record in records)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -328,7 +348,7 @@ def test_heartbeat_keeps_long_inference_lease_valid(tmp_path, inference_stream, 
 @pytest.mark.parametrize("heartbeat_failure", ["lease-lost", "database-error"])
 @pytest.mark.django_db(transaction=True)
 def test_heartbeat_failure_never_writes_terminal_state_or_ack(
-    tmp_path, inference_stream, monkeypatch, heartbeat_failure
+    tmp_path, inference_stream, monkeypatch, heartbeat_failure, capsys
 ):
     """心跳失权或数据库异常均保留非终态任务和未确认消息。"""
     client, stream, group = inference_stream
@@ -368,6 +388,14 @@ def test_heartbeat_failure_never_writes_terminal_state_or_ack(
     assert task.failure_code is None
     assert task.execution_token is not None
     assert client.xpending(stream, group)["pending"] == 1
+    output = capsys.readouterr().out
+    records = parse_console_records(output)
+    lost = [record for record in records if record["event"] == "inference.task.lease_lost"]
+    assert len(lost) == 1
+    assert lost[0]["taskId"] == str(task.pk)
+    assert lost[0]["reason"] == ("heartbeat_error" if heartbeat_failure == "database-error" else "lease_expired")
+    assert all(record["event"] not in {"inference.task.succeeded", "inference.task.failed"} for record in records)
+    assert "不可持久化的数据库诊断" not in output
 
 
 @pytest.mark.django_db(transaction=True)
@@ -399,3 +427,80 @@ def test_shutdown_signal_finishes_current_task_and_stops_batch(
     assert first_task.status == Task.StatusChoices.SUCCEEDED
     assert second_task.status == Task.StatusChoices.SUBMITTED
     assert client.xpending(stream, group)["pending"] == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_invalid_input_logs_only_committed_safe_failure(tmp_path, inference_stream, capsys):
+    """真实输入解析失败只输出已保存错误码，不泄露原始输入。"""
+    client, stream, group = inference_stream
+    with override_settings(TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"):
+        task = _create_example_task()
+        input_file = TaskInputFile.objects.get(task=task)
+        storage = LocalFileStorage(Path(settings.TASK_DATA_ROOT), Path(settings.MODEL_ARTIFACT_ROOT))
+        storage.resolve_file(StorageArea.TASK_DATA, input_file.storage_key).write_text("HEALTH-INPUT-SENTINEL")
+        _run_once()
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.FAILED
+    assert task.failure_code == "INFERENCE.INVALID_INPUT"
+    assert client.xpending(stream, group)["pending"] == 0
+    output = capsys.readouterr().out
+    records = parse_console_records(output)
+    failed = [record for record in records if record["event"] == "inference.task.failed"]
+    assert len(failed) == 1 and failed[0]["errorCode"] == task.failure_code
+    assert failed[0]["taskId"] == str(task.pk)
+    assert "HEALTH-INPUT-SENTINEL" not in output
+
+
+@pytest.mark.parametrize("boundary", ["save-error", "save-rejected", "ack-error"])
+@pytest.mark.django_db(transaction=True)
+def test_result_logs_do_not_cross_persistence_and_ack_boundaries(
+    tmp_path, inference_stream, monkeypatch, capsys, boundary,
+):
+    """保存失败、失权和确认失败分别保持真实数据库状态与日志含义。"""
+    from django.core.management.base import CommandError
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    client, stream, group = inference_stream
+    actual_save = inference_command.save_task_execution_success
+
+    def interrupted_save(*, task_id, execution_token, result):
+        """在真实终态事务前模拟数据库故障或使数据库租约过期。"""
+        if boundary == "save-error":
+            raise OperationalError("PRIVATE-DATABASE-SENTINEL")
+        Task.objects.filter(pk=task_id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+        return actual_save(task_id=task_id, execution_token=execution_token, result=result)
+
+    def interrupted_ack(*args, **kwargs):
+        """模拟终态提交后的 Redis 确认故障。"""
+        raise RedisConnectionError("PRIVATE-REDIS-SENTINEL")
+
+    with override_settings(TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"):
+        task = _create_example_task()
+        if boundary == "ack-error":
+            monkeypatch.setattr(Redis, "xack", interrupted_ack)
+        else:
+            monkeypatch.setattr(inference_command, "save_task_execution_success", interrupted_save)
+        if boundary == "save-rejected":
+            _run_once()
+        else:
+            with pytest.raises(CommandError):
+                _run_once()
+    task.refresh_from_db()
+    records = parse_console_records(capsys.readouterr().out)
+    assert client.xpending(stream, group)["pending"] >= 1
+    events = [record["event"] for record in records]
+    assert "inference.task.failed" not in events
+    if boundary == "ack-error":
+        assert task.status == Task.StatusChoices.SUCCEEDED
+        assert events.index("inference.task.succeeded") < events.index("inference.worker.error")
+    else:
+        assert task.status == Task.StatusChoices.RUNNING
+        assert task.result_payload is None and task.finished_at is None
+        assert "inference.task.succeeded" not in events
+    if boundary == "save-rejected":
+        assert "inference.task.lease_lost" in events
+    else:
+        error = next(record for record in records if record["event"] == "inference.worker.error")
+        assert error["taskId"] == str(task.pk)
+        assert "inference.worker.stopped" not in events
+    assert "PRIVATE-" not in str(records)

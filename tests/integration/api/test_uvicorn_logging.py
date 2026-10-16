@@ -2,7 +2,6 @@
 
 import json
 import os
-import shlex
 import socket
 import subprocess
 import sys
@@ -10,6 +9,8 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+from tests.log_records import parse_console_records
 
 
 def _free_loopback_port() -> int:
@@ -135,11 +136,7 @@ def test_real_uvicorn_requests_write_separate_safe_logs(tmp_path: Path):
     application_text = (log_dir / "application.log").read_text(encoding="utf-8")
     server_records = [json.loads(line) for line in server_text.splitlines()]
     application_records = [json.loads(line) for line in application_text.splitlines()]
-    stdout_records = [
-        dict(field.split("=", 1) for field in shlex.split(line))
-        for line in stdout.splitlines()
-        if line.startswith("timestamp=")
-    ]
+    stdout_records = parse_console_records(stdout)
     api_stdout_records = [
         record for record in stdout_records if record["event"] != "application.test"
     ]

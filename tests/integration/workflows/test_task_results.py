@@ -300,7 +300,7 @@ def test_failure_persists_only_safe_code_and_fixed_message(
         task_id=task.pk,
         execution_token=token,
         error=error,
-    )
+    ) == expected_code
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
@@ -325,11 +325,11 @@ def test_stale_or_expired_execution_cannot_commit_failure(stale_kind):
             lease_expires_at=timezone.now() - timedelta(seconds=1)
         )
 
-    assert not record_task_execution_failure(
+    assert record_task_execution_failure(
         task_id=task.pk,
         execution_token=supplied_token,
         error=InferenceError("INFERENCE.INVALID_INPUT", "不可保存的原始内容"),
-    )
+    ) is None
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.RUNNING
@@ -359,11 +359,11 @@ def test_old_execution_failure_cannot_overwrite_reclaimed_success():
         ),
     )
 
-    assert not record_task_execution_failure(
+    assert record_task_execution_failure(
         task_id=task.pk,
         execution_token=old_token,
         error=InferenceError("INFERENCE.INVALID_INPUT", "旧执行结果"),
-    )
+    ) is None
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.SUCCEEDED
@@ -409,7 +409,7 @@ def test_output_file_is_authoritative_only_after_valid_success_commit(
                 task_id=task.pk,
                 execution_token=token,
                 error=InferenceError("INFERENCE.INVALID_INPUT", "不公开的诊断"),
-            )
+            ) == "INFERENCE.INVALID_INPUT"
         else:
             Task.objects.filter(pk=task.pk).update(
                 lease_expires_at=timezone.now() - timedelta(seconds=1)

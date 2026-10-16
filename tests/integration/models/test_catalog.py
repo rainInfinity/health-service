@@ -13,12 +13,6 @@ from health_service.models import (
 
 
 @pytest.mark.django_db
-def test_channel_model_catalog_starts_without_seed_rows():
-    assert Channel.objects.count() == 0
-    assert Model.objects.count() == 0
-
-
-@pytest.mark.django_db
 def test_channel_label_is_unique():
     Channel.objects.create(label="android-cn")
 

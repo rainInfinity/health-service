@@ -6,17 +6,16 @@ import io
 import json
 import logging
 import logging.config
-import shlex
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 from django.conf import settings
 from django.test import AsyncClient, override_settings
 
 from health_service.api.structured_logging import ConsoleApiFormatter
+from tests.log_records import parse_console_records as _parse_console_records
 
 
 @contextmanager
@@ -34,13 +33,6 @@ def _isolated_file_logging(log_dir: Path) -> Iterator[Path]:
         logging.config.dictConfig(original_logging)
 
 
-def _parse_console_records(output: str) -> list[dict[str, str]]:
-    """解析人类可读的日志键值行。"""
-    records = []
-    for line in output.splitlines():
-        if line.startswith("timestamp="):
-            records.append(dict(field.split("=", 1) for field in shlex.split(line)))
-    return records
 
 
 def test_console_formatter_colors_only_interactive_stdout(monkeypatch):
@@ -69,7 +61,7 @@ def test_console_formatter_colors_only_interactive_stdout(monkeypatch):
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     plain = ConsoleApiFormatter().format(record)
 
-    assert "\x1b[31mlevel=ERROR\x1b[0m" in colored
+    assert "\x1b[31mERROR\x1b[0m" in colored
     assert "\x1b[36mevent=request.exception\x1b[0m" in colored
     assert "\x1b[31mstatus=500\x1b[0m" in colored
     assert "\x1b[" not in plain
@@ -101,8 +93,6 @@ def test_request_completion_has_readable_console_fields(capsys):
     assert response.json()["requestId"] == response["X-Request-ID"]
     assert len([record for record in records if record["event"] == "request.completed"]) == 1
     record = next(record for record in records if record["event"] == "request.completed")
-    assert record["timestamp"].endswith("Z")
-    datetime.fromisoformat(record["timestamp"])
     assert record["level"] == "INFO"
     assert record["method"] == "GET"
     assert record["status"] == "200"

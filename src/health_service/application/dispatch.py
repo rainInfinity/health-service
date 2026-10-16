@@ -3,6 +3,7 @@
 from django.conf import settings
 from django.db import DatabaseError
 
+from health_service.inference_logging import log_inference_event
 from health_service.infrastructure.persistence import tasks as persistence
 from health_service.infrastructure.streaming import publish_task_message
 
@@ -10,10 +11,17 @@ from health_service.infrastructure.streaming import publish_task_message
 def dispatch_task(task_id: int) -> bool:
     """发布任务主键并条件记录成功时间，允许安全重复派发。"""
     if not publish_task_message(task_id):
+        log_inference_event(
+            "inference.dispatch.failed", task_id=task_id, reason="dispatch_publish_failed",
+        )
         return False
     try:
         persistence.mark_task_dispatched(task_id=task_id)
     except DatabaseError:
+        log_inference_event(
+            "inference.dispatch.failed", task_id=task_id, reason="dispatch_marker_failed",
+            exception_type="DatabaseError",
+        )
         return True
     return True
 

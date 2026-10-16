@@ -1,7 +1,5 @@
 """定义管理目录与普通渠道可见的模型响应。"""
 
-from datetime import datetime
-
 from ninja import Schema
 from pydantic import ConfigDict, Field
 
@@ -12,6 +10,7 @@ from health_service.schemas.internal.catalog import (
     ModelArtifactData,
     ModelVersionData,
 )
+from health_service.schemas.responses.types import BeijingDateTime
 
 
 class CatalogModelResponse(Schema):
@@ -37,9 +36,9 @@ class ModelVersionResponse(Schema):
     version: str = Field(description="版本号")
     algorithm_key: str = Field(alias="algorithmKey", description="受控算法标识")
     params: dict[str, object] | None = Field(description="固定算法参数")
-    published_at: datetime | None = Field(
+    published_at: BeijingDateTime | None = Field(
         alias="publishedAt",
-        description="首次发布时间；未发布时为 null",
+        description="首次发布时间（Asia/Shanghai）；未发布时为 null",
     )
 
 

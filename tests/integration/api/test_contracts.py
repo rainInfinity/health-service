@@ -1,8 +1,9 @@
 import asyncio
 import json
-import shlex
 
 from django.test import AsyncClient, override_settings
+
+from tests.log_records import parse_console_records
 
 
 def _schema_properties(schema, components):
@@ -135,11 +136,7 @@ def test_unknown_exception_is_safe_in_both_debug_modes(capsys):
         ):
             assert sentinel not in output
 
-        records = [
-            dict(field.split("=", 1) for field in shlex.split(line))
-            for line in output.splitlines()
-            if line.startswith("timestamp=")
-        ]
+        records = parse_console_records(output)
         exception_records = [record for record in records if record["event"] == "request.exception"]
         completion_records = [
             record for record in records if record["event"] == "request.completed"

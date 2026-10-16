@@ -11,6 +11,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from health_service.inference_logging import inference_log_fields
+from health_service.time_formats import format_beijing_datetime
+
 from .request_context import RequestContext
 
 _API_LOGGER = logging.getLogger("health_service.api")
@@ -69,9 +72,7 @@ def _structured_entry(record: logging.LogRecord) -> dict[str, Any]:
         fields = ()
 
     entry: dict[str, Any] = {
-        "timestamp": datetime.fromtimestamp(record.created, UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z"),
+        "timestamp": format_beijing_datetime(datetime.fromtimestamp(record.created, UTC)),
         "level": record.levelname,
         "event": stable_event,
     }
@@ -79,6 +80,8 @@ def _structured_entry(record: logging.LogRecord) -> dict[str, Any]:
         value = getattr(record, field, None)
         if value is not None:
             entry[field] = value
+    if not is_api_record:
+        entry.update(inference_log_fields(record))
     return entry
 
 
@@ -120,12 +123,16 @@ class ConsoleApiFormatter(logging.Formatter):
         """格式化安全字段；非终端输出不含 ANSI 控制码。"""
         entry = _structured_entry(record)
         is_tty = getattr(sys.stdout, "isatty", lambda: False)()
-        parts = []
+        parts = [
+            entry.pop("timestamp"),
+            _colorize(entry.pop("level"), _LEVEL_COLORS.get(record.levelno), is_tty),
+        ]
+        status = entry.pop("status", None)
+        if status is not None:
+            entry = {"status": status, **entry}
         for key, value in entry.items():
             field = f"{key}={_format_console_value(value)}"
-            if key == "level":
-                field = _colorize(field, _LEVEL_COLORS.get(record.levelno), is_tty)
-            elif key == "event":
+            if key == "event":
                 field = _colorize(field, "36", is_tty)
             elif key == "status" and isinstance(value, int):
                 field = _colorize(

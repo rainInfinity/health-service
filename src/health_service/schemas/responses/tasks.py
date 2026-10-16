@@ -1,7 +1,5 @@
 """定义普通渠道可见的任务分页摘要与详情字段。"""
 
-from datetime import datetime
-
 from ninja import Schema
 from pydantic import ConfigDict, Field
 
@@ -10,6 +8,7 @@ from health_service.schemas.internal.tasks import (
     TaskInputFileData,
     TaskSummaryData,
 )
+from health_service.schemas.responses.types import BeijingDateTime
 
 
 class TaskSummaryResponse(Schema):
@@ -25,10 +24,10 @@ class TaskSummaryResponse(Schema):
     version: str = Field(description="固定模型版本号")
     status: str = Field(description="任务状态")
     is_example: bool = Field(alias="isExample", description="是否为非临床示例算法")
-    created_at: datetime = Field(alias="createdAt", description="任务创建时间")
-    submitted_at: datetime | None = Field(alias="submittedAt", description="提交时间")
-    started_at: datetime | None = Field(alias="startedAt", description="首次开始时间")
-    finished_at: datetime | None = Field(alias="finishedAt", description="终结时间")
+    created_at: BeijingDateTime = Field(alias="createdAt", description="任务创建时间（Asia/Shanghai）")
+    submitted_at: BeijingDateTime | None = Field(alias="submittedAt", description="提交时间（Asia/Shanghai）")
+    started_at: BeijingDateTime | None = Field(alias="startedAt", description="首次开始时间（Asia/Shanghai）")
+    finished_at: BeijingDateTime | None = Field(alias="finishedAt", description="终结时间（Asia/Shanghai）")
 
 
 class TaskPageResponse(Schema):
@@ -66,7 +65,7 @@ class TaskInputFileResponse(Schema):
     file_id: int = Field(alias="fileId", description="输入文件记录主键")
     logical_name: str = Field(alias="logicalName", description="算法声明的输入逻辑名")
     size_bytes: int = Field(alias="sizeBytes", description="文件大小，单位字节")
-    uploaded_at: datetime = Field(alias="uploadedAt", description="完整上传登记时间")
+    uploaded_at: BeijingDateTime = Field(alias="uploadedAt", description="完整上传登记时间（Asia/Shanghai）")
     is_selected: bool = Field(alias="isSelected", description="是否为当前选中的输入")
 
 

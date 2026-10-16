@@ -48,15 +48,16 @@ def record_task_execution_failure(
     task_id: int,
     execution_token: UUID,
     error: InferenceError | None,
-) -> bool:
-    """安全映射执行错误并仅在当前有效租约内原子写入失败终态。"""
+) -> str | None:
+    """提交安全失败终态后返回实际失败码；失权时返回空值。"""
     failure_code, failure_message = _safe_failure_fields(error)
-    return persistence.record_task_execution_failure(
+    committed = persistence.record_task_execution_failure(
         task_id=task_id,
         execution_token=execution_token,
         failure_code=failure_code,
         failure_message=failure_message,
     )
+    return failure_code if committed else None
 
 
 def _safe_failure_fields(error: InferenceError | None) -> tuple[str, str]:
