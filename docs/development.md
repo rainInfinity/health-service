@@ -40,6 +40,15 @@ Django 从项目根目录读取可选的 `.env`，不受启动时工作目录影
 
 `DJANGO_SECRET_KEY`、`JWT_SIGNING_KEY`、`DJANGO_ALLOWED_HOSTS`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES_HOST` 必须显式提供。模板中的 `DJANGO_DEBUG` 默认设为 `true`，未设置时默认为关闭；`POSTGRES_PORT` 未设置时默认为 `5432`。
 
+### Token 有效期配置
+
+| 变量 | 默认值 | 约束与用途 |
+|---|---|---|
+| `JWT_ACCESS_TOKEN_LIFETIME_SECONDS` | `604800` | Access 有效期，正整数秒；默认 7 天。 |
+| `JWT_REFRESH_TOKEN_LIFETIME_SECONDS` | `2592000` | Refresh 有效期，正整数秒；默认 30 天。 |
+
+两项可独立省略，支持进程环境和 `.env`，进程环境优先；显式空值、零、负数、小数或非数字会使启动失败，不回退到文件或默认值。修改后需重启签发服务，普通渠道和 manager 的登录及 Refresh 轮换均使用新配置。已有令牌仍依各自的 `exp` 失效：缩短配置不会提前撤销，延长配置也不会延长或复活旧令牌。JWT 的 `exp`、`iat` 保持标准数值格式，不转换为北京时间字符串；不要在日志中输出令牌。
+
 ### 推理服务与本地目录配置
 
 以下变量可由进程环境或项目根目录 `.env` 提供；进程环境优先。相对目录以项目根目录为基准，Web 与消费者必须配置为同一批共享可达的目录。服务启动时会创建目录并检查读写权限。
@@ -91,23 +100,23 @@ uv python install 3.13
 uv sync --locked
 uv run --locked python manage.py check
 uv run --locked python manage.py migrate
-uv run --locked uvicorn config.asgi:application --app-dir src --host 127.0.0.1 --port 8000 --no-access-log --workers 1
+LOG_DIR=logs/web uv run --locked uvicorn config.asgi:application --app-dir src --host 127.0.0.1 --port 8000 --no-access-log --workers 1
 ```
 
 当前提供五个普通渠道的账号注册、密码登录与本人账号／健康资料接口；模型目录与版本发布、管理渠道校验及普通渠道可用模型查询见后续章节。
 
 ## 独立推理消费者运行与部署
 
-Web 与消费者必须使用同一版本代码、数据库、Redis 配置及共享可达的 `TASK_DATA_ROOT`、`MODEL_ARTIFACT_ROOT`。在项目根目录另开进程运行常驻消费者；每个消费者实例使用不同名称，省略 `--consumer` 时命令会生成主机名、进程号和随机后缀：
+Web 与消费者必须使用同一版本代码、数据库、Redis 配置及共享可达的 `TASK_DATA_ROOT`、`MODEL_ARTIFACT_ROOT`，但使用各自独立的 `LOG_DIR`，避免多个进程写入同一轮转文件。在项目根目录另开进程运行常驻消费者；每个消费者实例使用不同名称，省略 `--consumer` 时命令会生成主机名、进程号和随机后缀：
 
 ```sh
-uv run --locked python manage.py run_inference --consumer local-inference-01
+LOG_DIR=logs/inference uv run --locked python manage.py run_inference --consumer local-inference-01
 ```
 
 可用单轮模式手动验证或执行一次有界恢复扫描：
 
 ```sh
-uv run --locked python manage.py run_inference --consumer manual-recovery --once
+LOG_DIR=logs/inference uv run --locked python manage.py run_inference --consumer manual-recovery --once
 ```
 
 每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
@@ -117,6 +126,20 @@ uv run --locked python manage.py run_inference --consumer manual-recovery --once
 **升级顺序：**先暂停新任务提交并备份数据库及两个文件根目录；停止旧消费者，检查遗留 `RUNNING` 任务；在维护窗口运行迁移；以共享配置启动新 Web 与消费者并确认可用后再开放提交。新旧消费者不得并行运行。**回滚顺序：**先暂停新提交，向消费者发送 SIGTERM 并等待当前安全执行结束，再停止 Web；保留数据库迁移字段、Redis Stream 和文件，不执行破坏性反向迁移或清理。旧版本不具备租约及 Stream 协议时不要启动旧消费者；未完成任务应留待兼容版本恢复。
 
 日志不得包含原始输入、输出内容、完整结果、健康资料快照、文件路径、执行令牌、Access／Refresh Token 或含凭证的 Redis URL。消费者故障定位使用固定错误摘要；不要为排查故障而放宽日志白名单。
+
+消费者结构化事件同时写入 stdout 与当前进程的 `application.log`。启动立即记录 `inference.worker.starting`；消费组初始化及首轮数据库扫描成功后记录一次 `inference.worker.ready`。空闲轮询与正常续约不反复打印 INFO；单轮结束或 SIGINT／SIGTERM 正常清理完成后记录 `inference.worker.stopped`。初始化失败记录 `inference.worker.error` 并错误退出，不误报就绪或正常停止。
+
+| 事件 | 含义 |
+|---|---|
+| `inference.message.received` | 收到消息；尚不表示拿到执行权。 |
+| `inference.task.started` | 已实际取得执行权，开始计算。 |
+| `inference.task.succeeded` | 成功结果与终态已提交，尚不保证 Redis ACK 成功。 |
+| `inference.task.failed` | 失败终态已提交，包含实际安全 `errorCode`。 |
+| `inference.task.lease_lost` | 续约失权、维护异常或终态写入被拒绝；不报告当前执行成功。 |
+| `inference.dispatch.failed` | 发布或派发时间补记失败，仍保留既有恢复资格。 |
+| `inference.worker.error` | 数据库或 Redis 基础设施故障，不等同于算法失败。 |
+
+任务事件可用 `consumer`、`taskId`、`messageId` 关联，`durationMs` 为单调时钟耗时，不因时间展示到秒而丢失毫秒精度。重复终态消息或有效租约占用不会制造新的开始事件。确认失败发生在成功事件之后时，以数据库成功状态为准，后续重放只需确认；不能把基础设施错误当作业务失败。受限字段不含原始异常正文、堆栈、SQL、输入输出或执行令牌。
 
 ## 账号注册、密码登录与本人账号查询
 普通渠道为 `android-cn`、`ios-cn`、`android-intl`、`ios-intl` 和 `wxapp`；示例中的 `{channel}` 使用其中一个值。`manager` 只允许已有管理账号登录及访问管理接口，不开放注册。账号是全局共用的，但签发的令牌绑定登录渠道。
@@ -428,11 +451,11 @@ curl --include --request POST \
 }
 ```
 
-登出不会撤销已签发的 Access；在其 7 天有效期内，只要账号仍可用且渠道匹配，该 Access 仍能访问本人接口。客户端登出后应立即丢弃它；服务端不承诺提前使其失效。其他渠道的独立 Refresh 不受本次登出影响。
+登出不会撤销已签发的 Access；在签发时配置决定的有效期内（默认 7 天），只要账号仍可用且渠道匹配，该 Access 仍能访问本人接口。客户端登出后应立即丢弃它；服务端不承诺提前使其失效。其他渠道的独立 Refresh 不受本次登出影响。
 
 ## JWT 密钥和过期令牌维护
 
-Access Token 有效期为 7 天，Refresh Token 有效期为 30 天。`JWT_SIGNING_KEY` 与 Django 的 `DJANGO_SECRET_KEY` 分开生成并保存；更换 JWT 密钥会使此前签发的令牌无法通过签名校验。
+Access Token 默认有效期为 7 天，Refresh Token 默认有效期为 30 天，可通过上文两个 `JWT_*_TOKEN_LIFETIME_SECONDS` 环境变量独立调整，以签发时配置和令牌自身 `exp` 为准。`JWT_SIGNING_KEY` 与 Django 的 `DJANGO_SECRET_KEY` 分开生成并保存；更换 JWT 密钥会使此前签发的令牌无法通过签名校验，这与仅调整有效期不同。
 
 启用账号 API 后，旧 Session 不会转换成 JWT。客户端部署新版本后必须重新登录，并安全保存登录响应中的 Access 与 Refresh；后续按接口契约轮换 Refresh。
 
@@ -446,19 +469,21 @@ uv run --locked python manage.py flushexpiredtokens
 
 ## 查看与采集请求日志
 
-API 请求完成和受限的异常定位事件以单行 `key=value` 格式写入 Web 进程标准输出，并以单行 JSON 写入 `server.log`；`health_service` 通用应用事件同样写入标准输出，并以单行 JSON 写入 `application.log`。API 记录只输出请求上下文白名单；通用应用记录只输出 `event`，不继承请求标识、用户或渠道。通用事件名必须使用固定的小写点分隔标识，无效名称统一输出为 `application.event`。任意日志消息和异常正文均不序列化。
+API 请求完成和受限的异常定位事件以“无键日期时间、无键级别、其余 `key=value`”的单行格式写入 Web 进程 stdout，并以单行 JSON 写入 `server.log`；`health_service` 通用应用事件同样写入 stdout，并以单行 JSON 写入 `application.log`。API 记录只输出请求上下文白名单；普通应用记录只输出稳定事件名，inference 仅额外保留其专属安全关联字段，均不继承其他请求的标识、用户或渠道。通用事件名必须使用固定的小写点分隔标识，无效名称统一输出为 `application.event`。任意日志消息和异常正文均不序列化。
 
-完成记录包含 UTC 时间、级别、事件、请求标识、HTTP 方法、路由模板、状态和耗时；只有可信的普通渠道、已鉴权用户 ID 或稳定错误码可用时才包含相应字段。标准输出连接交互终端时会高亮级别、事件和 HTTP 状态；重定向或被采集时不输出 ANSI 颜色码。以下为一个 404 的控制台示例：
+日志内容统一使用 `Asia/Shanghai` 的 `YYYY-MM-DD HH:mm:ss` 时间，不带小数秒和时区后缀，不依赖宿主机时区。完成记录还包含级别、事件、请求标识、HTTP 方法、路由模板、状态和耗时；只有可信的普通渠道、已鉴权用户 ID 或稳定错误码可用时才包含相应字段。stdout 连接交互终端时会高亮级别、事件和 HTTP 状态；重定向或被采集时不输出 ANSI 颜色码。以下为一个 404 的控制台示例：
 
 ```text
-timestamp=2026-10-12T12:00:00.000Z level=INFO event=request.completed requestId=0123456789abcdef0123456789abcdef method=GET route=<unmatched> status=404 durationMs=1.25 errorCode=NOT_FOUND
+2026-10-12 20:00:00 INFO status=404 event=request.completed requestId=0123456789abcdef0123456789abcdef method=GET route=<unmatched> durationMs=1.25 errorCode=NOT_FOUND
 ```
+
+JSON 文件保留 `timestamp`、`level` 键，时间值与同一事件的 stdout 相同。采集端需先读取固定 19 字符的日期时间，再读取级别与后续键值字段，不能再把整行直接作为 `key=value` 解析。旧 ISO 时间、`timestamp=` 和 `level=` 前缀不再输出；部署时同步切换客户端和采集解析规则，历史日志不重写。Uvicorn 自身启动信息和第三方输出不属于此结构化应用日志格式。
 
 未预期异常另有一条 `request.exception` 事件，包含同一 `requestId`、异常类型及 `module`／`function`／`line` 定位；不包含异常文本、源码行或局部变量。不要为复现故障而把凭证或健康资料写入日志。
 
 `LOG_DIR` 可选，默认是项目根目录下的 `logs/`；相对路径以项目根目录为基准，绝对路径按原值使用。启动时会创建目录；运行进程的操作系统账号必须对该目录有读取、写入和搜索权限，否则启动失败。API 日志写入 `server.log`，通用应用日志写入 `application.log`。
 
-两个文件分别按宿主机本地午夜轮转，每个保留最近 30 个归档，另有一个当前文件。本地午夜由操作系统时区决定，不使用 Django 的 `TIME_ZONE`。标准库轮转处理器不协调多进程写入；共享同一个 `LOG_DIR` 时只能运行一个 Web worker。启动命令显式使用 `--workers 1`；多进程部署必须为每个进程配置独立日志目录，或改用外部采集方案。
+两个文件分别按宿主机本地午夜轮转，每个保留最近 30 个归档，另有一个当前文件。本地午夜由操作系统时区决定，不使用 Django 的 `TIME_ZONE`，因此归档日期可能与内容中的北京时间日期不同。标准库轮转处理器不协调多进程写入；每个 Web worker、inference 消费者或单轮恢复进程必须使用独立日志目录，或改用外部采集方案。上述命令按 `logs/web`、`logs/inference` 分离 Web 与消费者；不要同时运行两个共享 `logs/inference` 的消费进程。
 
 Uvicorn 访问日志已关闭，Django 请求错误和数据库调试日志也不会输出原始路径、查询参数或 SQL。日志不得记录请求／响应正文、密码、令牌、Cookie、手机号、健康资料或未经验证的转发 IP。
 
@@ -467,6 +492,8 @@ Uvicorn 访问日志已关闭，Django 请求错误和数据库调试日志也�
 `/api/v1/` 下的 JSON 业务路由使用 `code`、`message`、`data`、`requestId` 四个字段；成功码为字符串 `OK`，无业务载荷时 `data` 为 `null`。HTTP 200／201 表示成功，响应正文的 `requestId` 必须与 `X-Request-ID` 响应头一致。客户端提供的请求标识不会覆盖服务端值。
 
 成功与错误 JSON 响应均使用 UTF-8 编码，直接输出 `message`、`data` 中的中文等非 ASCII 字符，不转义为 `\uXXXX`。API 的 JSON renderer 与公共错误响应统一设置 `ensure_ascii=False`；引号、反斜杠和控制字符仍按 JSON 规则转义，解析后的字段值保持不变。
+
+业务日期时间字段（`createdAt`、`submittedAt`、`startedAt`、`finishedAt`、`uploadedAt`、`publishedAt`）统一转换为北京时间 `Asia/Shanghai`，输出 `YYYY-MM-DD HH:mm:ss`；例如 `2026-10-10T18:00:00Z` 返回 `2026-10-11 02:00:00`。小数秒仅在展示时省略，不四舍五入，数据库时间、排序和租约精度不变；空时间仍为 `null`，`birthDate` 仍为 `YYYY-MM-DD`。任意结果或扩展资料中的字符串及下载文件内容不改写。OpenAPI 声明对应字符串格式、示例和时区，不再将响应日期时间声明为 RFC 3339 `date-time`。客户端必须按北京时间解释，不应依赖本地时区推断。
 
 以下 JSON 示例为 HTTP 200；创建成功使用 HTTP 201，回复结构相同。
 
