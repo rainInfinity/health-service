@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from health_service.api.exceptions import ApiError, ApiErrorCode
 from health_service.api.v1.common import require_manager_channel
 

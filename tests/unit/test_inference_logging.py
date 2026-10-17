@@ -5,7 +5,6 @@ import logging
 from datetime import UTC, datetime
 
 import pytest
-
 from health_service.api.structured_logging import ConsoleApiFormatter, StructuredApiFormatter
 
 

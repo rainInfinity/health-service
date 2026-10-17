@@ -6,7 +6,6 @@ from threading import Barrier
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, close_old_connections, connection, connections
-
 from health_service.application.accounts import UsernameAlreadyExists, register_user
 from health_service.models import Profile
 

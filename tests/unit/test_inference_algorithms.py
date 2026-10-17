@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from health_inference import get_algorithm, register_algorithm
 from health_inference.algorithms.hr_br.template import HR_BR_TEMPLATE
 from health_inference.exceptions import InferenceError, UnknownAlgorithmError
@@ -119,17 +118,17 @@ def test_registry_rejects_duplicate_builtin_algorithm():
         register_algorithm(get_algorithm("hr_br.example"))
 
 
-def test_health_inference_imports_without_django_initialization():
-    """验证纯计算包在未导入 Django 的独立进程中可用。"""
-    source_root = Path(__file__).resolve().parents[2] / "src"
-    environment = {**os.environ, "PYTHONPATH": str(source_root)}
+def test_health_inference_imports_without_django_initialization(tmp_path: Path):
+    """验证已安装的纯计算包可在仓库外独立导入。"""
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
     process = subprocess.run(
         [
             sys.executable,
             "-c",
             "import sys; import health_inference; assert 'django' not in sys.modules",
         ],
-        cwd=source_root.parent,
+        cwd=tmp_path,
         env=environment,
         capture_output=True,
         check=False,

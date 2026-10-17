@@ -12,7 +12,6 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connections
 from django.test import AsyncClient
-
 from health_service.application.profiles import update_profile
 from health_service.infrastructure.auth.tokens import issue_token_pair
 from health_service.models import Profile

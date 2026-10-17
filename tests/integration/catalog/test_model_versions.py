@@ -3,7 +3,6 @@
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
-
 from health_service.application.catalog import (
     create_model,
     create_model_version,

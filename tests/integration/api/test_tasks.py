@@ -9,7 +9,6 @@ from django.contrib.auth import get_user_model
 from django.db import connections
 from django.test import AsyncClient
 from django.utils import timezone
-
 from health_service.application.catalog import (
     create_model,
     create_model_version,

@@ -10,7 +10,6 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.test import override_settings
 from django.utils import timezone
-
 from health_inference import (
     AlgorithmDefinition,
     InferenceError,

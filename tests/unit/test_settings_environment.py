@@ -54,10 +54,13 @@ print(json.dumps({
 def _isolated_project(tmp_path: Path) -> Path:
     """复制配置模块到临时项目，避免触碰仓库中的本地 .env。"""
     project_root = tmp_path / "project"
-    config_dir = project_root / "src" / "config"
+    config_dir = project_root / "packages" / "health-service" / "src" / "config"
     config_dir.mkdir(parents=True)
     (config_dir / "__init__.py").write_text("", encoding="utf-8")
-    shutil.copyfile(_REPOSITORY_ROOT / "src/config/settings.py", config_dir / "settings.py")
+    shutil.copyfile(
+        _REPOSITORY_ROOT / "packages/health-service/src/config/settings.py",
+        config_dir / "settings.py",
+    )
     return project_root
 
 
@@ -97,7 +100,9 @@ def _run_settings(
     }
     for name in ("PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT"):
         environment.pop(name, None)
-    environment["PYTHONPATH"] = str(project_root / "src")
+    environment["PYTHONPATH"] = str(
+        project_root / "packages" / "health-service" / "src"
+    )
     environment.update(process_settings or {})
     return subprocess.run(
         [sys.executable, "-c", _SETTINGS_SCRIPT],
@@ -207,6 +212,24 @@ def test_settings_find_project_dotenv_from_another_working_directory(tmp_path: P
     settings = _settings_output(_run_settings(project_root, working_directory))
 
     assert settings["database_host"] == "database-from-file"
+
+
+def test_member_dotenv_does_not_override_project_dotenv(tmp_path: Path):
+    """验证工作区成员目录的 `.env` 不会替代仓库根配置。"""
+    project_root = _isolated_project(tmp_path)
+    (project_root / ".env").write_text(
+        _dotenv_content({**_REQUIRED_SETTINGS, "POSTGRES_HOST": "database-from-root"}),
+        encoding="utf-8",
+    )
+    member_root = project_root / "packages" / "health-service"
+    (member_root / ".env").write_text(
+        _dotenv_content({**_REQUIRED_SETTINGS, "POSTGRES_HOST": "database-from-member"}),
+        encoding="utf-8",
+    )
+
+    settings = _settings_output(_run_settings(project_root, project_root))
+
+    assert settings["database_host"] == "database-from-root"
 
 
 def test_only_template_cannot_supply_required_configuration(tmp_path: Path):

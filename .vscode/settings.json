@@ -1,0 +1,6 @@
+{
+  "python.analysis.extraPaths": [
+    "packages/health-service/src",
+    "packages/health-inference/src"
+  ]
+}

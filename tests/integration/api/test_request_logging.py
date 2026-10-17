@@ -13,8 +13,8 @@ from pathlib import Path
 
 from django.conf import settings
 from django.test import AsyncClient, override_settings
-
 from health_service.api.structured_logging import ConsoleApiFormatter
+
 from tests.log_records import parse_console_records as _parse_console_records
 
 

@@ -5,7 +5,6 @@ from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-
 from health_service.application.catalog import (
     create_model,
     create_model_version,

@@ -59,15 +59,12 @@ def test_real_uvicorn_requests_write_separate_safe_logs(tmp_path: Path):
     log_dir = tmp_path / "logs"
     port = _free_loopback_port()
     environment = os.environ.copy()
-    python_path = [str(project_root), str(project_root / "src")]
-    if environment.get("PYTHONPATH"):
-        python_path.append(environment["PYTHONPATH"])
+    environment.pop("PYTHONPATH", None)
     environment.update(
         {
             "DJANGO_DEBUG": "false",
             "DJANGO_ALLOWED_HOSTS": "127.0.0.1,localhost",
             "LOG_DIR": str(log_dir),
-            "PYTHONPATH": os.pathsep.join(python_path),
         }
     )
     process = subprocess.Popen(
@@ -76,8 +73,6 @@ def test_real_uvicorn_requests_write_separate_safe_logs(tmp_path: Path):
             "-m",
             "uvicorn",
             "tests.integration.api.asgi:application",
-            "--app-dir",
-            str(project_root / "src"),
             "--host",
             "127.0.0.1",
             "--port",

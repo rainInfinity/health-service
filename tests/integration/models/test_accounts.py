@@ -1,7 +1,7 @@
+import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-import pytest
 
 
 @pytest.mark.django_db
@@ -42,13 +42,12 @@ def test_soft_deleted_user_keeps_phone_reserved():
     user.deleted_at = timezone.now()
     user.save(update_fields={"is_active", "deleted_at"})
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            user_model.objects.create_user(
-                username="replacement-owner",
-                password="secret",
-                phone="+8613800000000",
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        user_model.objects.create_user(
+            username="replacement-owner",
+            password="secret",
+            phone="+8613800000000",
+        )
 
 
 @pytest.mark.django_db

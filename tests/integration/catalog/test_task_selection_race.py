@@ -6,7 +6,6 @@ from threading import Barrier
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connections
-
 from health_service.application.catalog import (
     create_model,
     create_model_version,

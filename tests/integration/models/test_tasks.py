@@ -6,7 +6,6 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-
 from health_service.models import Channel, Model, ModelVersion, Task
 
 
@@ -54,14 +53,13 @@ def test_running_task_requires_an_execution_token_and_lease(
     execution_token, lease_expires_at
 ):
     """验证运行中任务必须同时保存执行令牌和租约。"""
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix="running-without-lease",
-                status=Task.StatusChoices.RUNNING,
-                execution_token=execution_token,
-                lease_expires_at=lease_expires_at,
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix="running-without-lease",
+            status=Task.StatusChoices.RUNNING,
+            execution_token=execution_token,
+            lease_expires_at=lease_expires_at,
+        )
 
 
 @pytest.mark.django_db
@@ -104,37 +102,33 @@ def test_terminal_task_rejects_execution_ownership(status, field):
     else:
         fields.update(failure_code="TASK.ERROR", finished_at=timezone.now())
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix=f"terminal-with-lease-{status}-{field}",
-                **fields,
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix=f"terminal-with-lease-{status}-{field}",
+            **fields,
+        )
 
 
 @pytest.mark.django_db
 def test_task_rejects_negative_attempt_count():
     """验证数据库拒绝负执行领取次数。"""
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(prefix="negative-attempt-count", attempt_count=-1)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(prefix="negative-attempt-count", attempt_count=-1)
 
 @pytest.mark.django_db
 def test_success_requires_result_and_completion_time():
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix="success-missing-result",
-                status=Task.StatusChoices.SUCCEEDED,
-                finished_at=timezone.now(),
-            )
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix="success-missing-finished-at",
-                status=Task.StatusChoices.SUCCEEDED,
-                result_payload={"value": 1},
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix="success-missing-result",
+            status=Task.StatusChoices.SUCCEEDED,
+            finished_at=timezone.now(),
+        )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix="success-missing-finished-at",
+            status=Task.StatusChoices.SUCCEEDED,
+            result_payload={"value": 1},
+        )
 
     task = _create_task(
         prefix="valid-success",
@@ -147,28 +141,25 @@ def test_success_requires_result_and_completion_time():
 
 @pytest.mark.django_db
 def test_failed_task_requires_completion_time_and_nonempty_code():
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix="failure-missing-code",
-                status=Task.StatusChoices.FAILED,
-                finished_at=timezone.now(),
-            )
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix="failure-missing-finished-at",
-                status=Task.StatusChoices.FAILED,
-                failure_code="TASK.ERROR",
-            )
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix="failure-empty-code",
-                status=Task.StatusChoices.FAILED,
-                finished_at=timezone.now(),
-                failure_code="",
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix="failure-missing-code",
+            status=Task.StatusChoices.FAILED,
+            finished_at=timezone.now(),
+        )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix="failure-missing-finished-at",
+            status=Task.StatusChoices.FAILED,
+            failure_code="TASK.ERROR",
+        )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix="failure-empty-code",
+            status=Task.StatusChoices.FAILED,
+            finished_at=timezone.now(),
+            failure_code="",
+        )
 
     task = _create_task(
         prefix="valid-failure",
@@ -196,19 +187,17 @@ def test_nonterminal_or_nonfailed_states_reject_conflicting_fields(status, field
         fields.update(result_payload={"value": 1}, finished_at=timezone.now())
     fields[field] = value
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(
-                prefix=f"conflict-{status.lower()}-{field}",
-                **fields,
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(
+            prefix=f"conflict-{status.lower()}-{field}",
+            **fields,
+        )
 
 
 @pytest.mark.django_db
 def test_task_rejects_unknown_status():
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_task(prefix="invalid-status", status="UNKNOWN")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_task(prefix="invalid-status", status="UNKNOWN")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -218,6 +207,5 @@ def test_task_rejects_missing_foreign_key_targets(relation):
     fields.pop(relation)
     fields[f"{relation}_id"] = -1
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            Task.objects.create(**fields)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Task.objects.create(**fields)

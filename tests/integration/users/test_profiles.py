@@ -10,7 +10,6 @@ from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-
 from health_service.application.profiles import read_profile, update_profile
 from health_service.models import Profile
 from health_service.schemas.internal import ProfileData

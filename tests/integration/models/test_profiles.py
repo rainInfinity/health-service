@@ -1,9 +1,8 @@
 from decimal import Decimal
 
+import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-import pytest
-
 from health_service.models import Profile
 
 
@@ -13,9 +12,8 @@ def test_profile_shares_user_primary_key_and_is_one_to_one():
     profile = Profile.objects.create(user=user)
 
     assert profile.pk == user.pk
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            Profile.objects.create(user=user)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Profile.objects.create(user=user)
 
 
 @pytest.mark.django_db
@@ -37,9 +35,9 @@ def test_unfilled_health_values_remain_null_or_absent():
     ("field", "value"),
     [
         ("gender", 3),
-        ("height_cm", Decimal("0")),
+        ("height_cm", Decimal(0)),
         ("height_cm", Decimal("-1.00")),
-        ("weight_kg", Decimal("0")),
+        ("weight_kg", Decimal(0)),
         ("weight_kg", Decimal("-1.00")),
     ],
 )
@@ -51,6 +49,5 @@ def test_database_rejects_invalid_profile_values(field, value):
     profile = Profile.objects.create(user=user)
     setattr(profile, field, value)
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            profile.save()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        profile.save()

@@ -5,7 +5,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-
 from health_service.infrastructure.storage import (
     EmptyUploadError,
     InvalidOutputFile,

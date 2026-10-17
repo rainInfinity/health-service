@@ -11,7 +11,6 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import close_old_connections, connections
 from django.test import override_settings
 from django.utils import timezone
-
 from health_service.application.catalog import (
     create_model,
     create_model_version,

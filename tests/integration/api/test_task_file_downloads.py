@@ -14,7 +14,6 @@ from django.contrib.auth import get_user_model
 from django.db import connections
 from django.test import AsyncClient, override_settings
 from django.utils import timezone
-
 from health_inference import (
     AlgorithmDefinition,
     InferenceInput,

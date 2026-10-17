@@ -7,6 +7,12 @@ import logging
 
 from django.http import HttpResponse, StreamingHttpResponse
 from django.urls import path
+from health_service.api.exceptions import (
+    ApiError,
+    ApiErrorCode,
+    register_exception_handlers,
+)
+from health_service.api.responses import ApiResponse, success_response
 from ninja import Schema
 from ninja.errors import (
     AuthenticationError,
@@ -15,13 +21,6 @@ from ninja.errors import (
 )
 from ninja_extra import NinjaExtraAPI
 from pydantic import Field
-
-from health_service.api.exceptions import (
-    ApiError,
-    ApiErrorCode,
-    register_exception_handlers,
-)
-from health_service.api.responses import ApiResponse, success_response
 
 _APPLICATION_LOGGER = logging.getLogger("health_service")
 

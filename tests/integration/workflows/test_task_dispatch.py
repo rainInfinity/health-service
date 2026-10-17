@@ -10,8 +10,6 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import OperationalError, transaction
 from django.test import override_settings
 from django.utils import timezone
-from redis import Redis
-
 from health_service.application.catalog import (
     create_model,
     create_model_version,
@@ -25,6 +23,7 @@ from health_service.application.tasks import (
     upload_task_input,
 )
 from health_service.models import Channel, Task
+from redis import Redis
 
 
 def _create_submitted_tasks(count: int) -> list[Task]:

@@ -1,8 +1,7 @@
+import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-import pytest
-
 from health_service.models import Channel, Model, ModelVersion, Task, TaskInputFile
 
 
@@ -48,9 +47,8 @@ def test_only_one_same_name_file_can_be_selected_per_task():
     task = _create_task("file-selected")
     _create_file(task, "input/selected-one.ecg", is_selected=True)
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_file(task, "input/selected-two.ecg", is_selected=True)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_file(task, "input/selected-two.ecg", is_selected=True)
 
 
 @pytest.mark.django_db
@@ -58,14 +56,13 @@ def test_only_one_same_name_file_can_be_selected_per_task():
 def test_file_size_must_be_positive(size_bytes):
     task = _create_task(f"file-size-{size_bytes}")
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_file(
-                task,
-                f"input/invalid-size-{size_bytes}.ecg",
-                is_selected=True,
-                size_bytes=size_bytes,
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_file(
+            task,
+            f"input/invalid-size-{size_bytes}.ecg",
+            is_selected=True,
+            size_bytes=size_bytes,
+        )
 
 
 @pytest.mark.django_db
@@ -74,6 +71,5 @@ def test_storage_key_is_unique_across_tasks():
     second_task = _create_task("file-key-two")
     _create_file(first_task, "input/shared-key.ecg", is_selected=True)
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            _create_file(second_task, "input/shared-key.ecg", is_selected=True)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        _create_file(second_task, "input/shared-key.ecg", is_selected=True)

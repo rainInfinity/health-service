@@ -11,7 +11,6 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connections
 from django.test import AsyncClient, override_settings
 from django.utils import timezone
-
 from health_service.application.catalog import (
     create_metric_definition,
     create_model,

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from django.test import override_settings
-
 from health_inference.registry import _ALGORITHMS
 from health_inference.types import AlgorithmDefinition, InferenceInput, InferenceOutput
 from health_service.application.catalog import (

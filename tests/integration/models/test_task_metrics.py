@@ -1,8 +1,7 @@
+import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-import pytest
-
 from health_service.models import (
     Channel,
     MetricDefinition,
@@ -79,14 +78,13 @@ def test_projection_requires_exactly_one_value(numeric_value, boolean_value):
         value_type=MetricDefinition.ValueTypeChoices.NUMBER,
     )
 
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            TaskMetric.objects.create(
-                task=task,
-                metric=metric,
-                numeric_value=numeric_value,
-                boolean_value=boolean_value,
-            )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        TaskMetric.objects.create(
+            task=task,
+            metric=metric,
+            numeric_value=numeric_value,
+            boolean_value=boolean_value,
+        )
 
 
 @pytest.mark.django_db
@@ -101,6 +99,5 @@ def test_task_and_metric_pair_is_unique_but_metric_can_be_reused():
     TaskMetric.objects.create(task=second_task, metric=metric, numeric_value=11.0)
 
     assert TaskMetric.objects.filter(metric=metric).count() == 2
-    with pytest.raises(IntegrityError):
-        with transaction.atomic():
-            TaskMetric.objects.create(task=first_task, metric=metric, numeric_value=12.0)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        TaskMetric.objects.create(task=first_task, metric=metric, numeric_value=12.0)

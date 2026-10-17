@@ -11,7 +11,6 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.utils import timezone
-
 from health_inference import (
     AlgorithmDefinition,
     InferenceError,

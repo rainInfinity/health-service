@@ -6,10 +6,10 @@ from unittest.mock import patch
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, override_settings
-
 from health_service.infrastructure.auth.tokens import issue_token_pair
 from health_service.models import ModelVersion, Profile, Task
 from health_service.schemas.responses.tasks import TaskInputFileResponse
+
 from tests.integration.workflows.test_inference_consumer import _PPG_CSV, _create_example_task
 
 

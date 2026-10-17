@@ -69,6 +69,7 @@ def _api_probe(data):
 def _stage(tmp_path, data, *, access_seconds, refresh_seconds):
     """重新启动签发配置并明确连接 pytest 测试库，绝不继承本机业务库。"""
     database = connection.settings_dict
+    project_root = Path(__file__).resolve().parents[3]
     environment = {
         **os.environ,
         "DJANGO_SETTINGS_MODULE": "config.settings",
@@ -85,16 +86,12 @@ def _stage(tmp_path, data, *, access_seconds, refresh_seconds):
         "MODEL_ARTIFACT_ROOT": str(tmp_path / "models"),
         "JWT_ACCESS_TOKEN_LIFETIME_SECONDS": str(access_seconds),
         "JWT_REFRESH_TOKEN_LIFETIME_SECONDS": str(refresh_seconds),
-        "PYTHONPATH": os.pathsep.join(
-            [
-                str(Path(__file__).resolve().parents[3]),
-                str(Path(__file__).resolve().parents[3] / "src"),
-            ]
-        ),
     }
+    environment.pop("PYTHONPATH", None)
     result = subprocess.run(
         [sys.executable, "-c", _WORKER],
         input=json.dumps(data),
+        cwd=project_root,
         env=environment,
         capture_output=True,
         text=True,

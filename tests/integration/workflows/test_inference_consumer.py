@@ -14,8 +14,6 @@ from django.core.management import call_command
 from django.db import OperationalError
 from django.test import override_settings
 from django.utils import timezone
-from redis import Redis
-
 from health_service.application.catalog import (
     create_metric_definition,
     create_model,
@@ -30,6 +28,8 @@ from health_service.infrastructure.inference_adapter import (
 from health_service.infrastructure.storage import LocalFileStorage, StorageArea
 from health_service.management.commands import run_inference as inference_command
 from health_service.models import Channel, Task, TaskInputFile, TaskMetric
+from redis import Redis
+
 from tests.log_records import parse_console_records
 
 _PPG_CSV = (
