@@ -4,7 +4,22 @@
 
 - Python 3.13，由 `uv` 管理解释器与依赖。
 - Docker，以及 PostgreSQL 16 或兼容的 PostgreSQL 服务。
-- 已提交的 `uv.lock`；日常安装使用 `uv sync --locked`，不要单独升级依赖而不更新锁文件。
+- 根目录唯一的 `uv.lock`；完整开发和测试环境使用 `uv sync --locked --all-packages`，不要单独升级依赖而不更新锁文件。
+
+### Python 工作区
+
+根目录 `pyproject.toml` 只编排两个成员，不是第三个业务项目；所有成员共用根目录的 `uv.lock` 和默认 `.venv`。`packages/health-service` 包含 Django `health_service` 与 `config`，声明业务运行依赖并显式依赖本地 `health-inference`；`packages/health-inference` 是纯 Python 计算包，目前不声明第三方运行依赖。
+
+```sh
+# 完整开发与测试环境
+uv sync --locked --all-packages
+# 仅业务成员及其运行依赖
+uv sync --locked --package health-service --no-dev
+# 仅计算成员及其运行依赖
+uv sync --locked --package health-inference --no-dev
+```
+
+`uv run --package ...` 选择运行成员，不切换当前目录；以下管理命令和 Web/消费者入口均从仓库根目录运行。
 
 ## 启动 PostgreSQL
 
@@ -30,8 +45,8 @@ docker run --rm --detach \
 
 ```sh
 cp .env.template .env
-uv run --locked python -c 'import secrets; print(secrets.token_urlsafe(50))'
-uv run --locked python -c 'import secrets; print(secrets.token_urlsafe(50))'
+uv run --locked --all-packages python -c 'import secrets; print(secrets.token_urlsafe(50))'
+uv run --locked --all-packages python -c 'import secrets; print(secrets.token_urlsafe(50))'
 ```
 
 将第一条命令输出填写到 `.env` 的 `DJANGO_SECRET_KEY`，第二条填写到独立的 `JWT_SIGNING_KEY`；不要复用密钥。再为 `POSTGRES_PASSWORD` 填入本地数据库密码。上面的 PostgreSQL 容器示例使用 `local-development-only`，仅用于本地开发，不要用于生产环境。
@@ -80,8 +95,8 @@ Django 从项目根目录读取可选的 `.env`，不受启动时工作目录影
 没有 `.env` 时，也可以在启动 Django 的同一 shell 中提供全部必填配置：
 
 ```sh
-export DJANGO_SECRET_KEY="$(uv run --locked python -c 'import secrets; print(secrets.token_urlsafe(50))')"
-export JWT_SIGNING_KEY="$(uv run --locked python -c 'import secrets; print(secrets.token_urlsafe(50))')"
+export DJANGO_SECRET_KEY="$(uv run --locked --all-packages python -c 'import secrets; print(secrets.token_urlsafe(50))')"
+export JWT_SIGNING_KEY="$(uv run --locked --all-packages python -c 'import secrets; print(secrets.token_urlsafe(50))')"
 export DJANGO_DEBUG=true
 export DJANGO_ALLOWED_HOSTS="localhost,127.0.0.1"
 export POSTGRES_DB=health_service
@@ -97,10 +112,10 @@ export POSTGRES_PORT=55432
 
 ```sh
 uv python install 3.13
-uv sync --locked
-uv run --locked python manage.py check
-uv run --locked python manage.py migrate
-LOG_DIR=logs/web uv run --locked uvicorn config.asgi:application --app-dir src --host 127.0.0.1 --port 8000 --no-access-log --workers 1
+uv sync --locked --all-packages
+uv run --locked --package health-service python manage.py check
+uv run --locked --package health-service python manage.py migrate
+LOG_DIR=logs/web uv run --locked --package health-service uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --no-access-log --workers 1
 ```
 
 当前提供五个普通渠道的账号注册、密码登录与本人账号／健康资料接口；模型目录与版本发布、管理渠道校验及普通渠道可用模型查询见后续章节。
@@ -110,13 +125,13 @@ LOG_DIR=logs/web uv run --locked uvicorn config.asgi:application --app-dir src -
 Web 与消费者必须使用同一版本代码、数据库、Redis 配置及共享可达的 `TASK_DATA_ROOT`、`MODEL_ARTIFACT_ROOT`，但使用各自独立的 `LOG_DIR`，避免多个进程写入同一轮转文件。在项目根目录另开进程运行常驻消费者；每个消费者实例使用不同名称，省略 `--consumer` 时命令会生成主机名、进程号和随机后缀：
 
 ```sh
-LOG_DIR=logs/inference uv run --locked python manage.py run_inference --consumer local-inference-01
+LOG_DIR=logs/inference uv run --locked --package health-service python manage.py run_inference --consumer local-inference-01
 ```
 
 可用单轮模式手动验证或执行一次有界恢复扫描：
 
 ```sh
-LOG_DIR=logs/inference uv run --locked python manage.py run_inference --consumer manual-recovery --once
+LOG_DIR=logs/inference uv run --locked --package health-service python manage.py run_inference --consumer manual-recovery --once
 ```
 
 每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
@@ -203,7 +218,7 @@ Access Token 仅适用于签发它的渠道，过期、缺失或无效令牌均�
 管理账号由受信任的运维人员在 Django shell 中创建，不通过公开注册接口建立。仅授予 `is_staff=True`；除非确有 Django 管理站点需求，不要同时授予 `is_superuser`：
 
 ```sh
-uv run --locked python manage.py shell
+uv run --locked --package health-service python manage.py shell
 ```
 
 ```python
@@ -462,7 +477,7 @@ Access Token 默认有效期为 7 天，Refresh Token 默认有效期为 30 天�
 Ninja JWT 的黑名单表会记录已签发的 Refresh。部署环境应每日运行以下管理命令，删除已经过期的令牌记录：
 
 ```sh
-uv run --locked python manage.py flushexpiredtokens
+uv run --locked --package health-service python manage.py flushexpiredtokens
 ```
 
 定时任务须使用应用配置中的 `JWT_SIGNING_KEY` 和数据库连接环境变量；不要在 API 请求中执行清理命令。

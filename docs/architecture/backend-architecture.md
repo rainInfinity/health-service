@@ -8,37 +8,50 @@
 
 ## 包与目录
 
-以下展示职责和建议位置，不要求预先创建所有文件；相关代码可先按职责合并，复杂后再拆分。
+实际 workspace 目录如下。成员内部按职责组织；未展开的具体业务文件可继续按现有领域边界拆分。
 
 ```text
-src/
-├── config/                           # Django ASGI 配置与 URL
-├── health_service/                   # Django App：业务与持久化
-│   ├── apps.py
-│   ├── models/                        # 按账号、渠道、模型目录、infer 分文件
-│   ├── migrations/
-│   ├── domain/                        # 确有必要的业务规则
-│   ├── application/                   # 注册登录、模型管理、提交推理等用例
-│   ├── schemas/
-│   │   ├── requests/                  # 外部入站契约
-│   │   ├── responses/                 # 对外响应契约
-│   │   └── internal/                  # 应用流程内部交换的数据
-│   ├── api/v1/                        # 渠道、版本的异步 HTTP 适配
-│   ├── infrastructure/
-│   │   ├── persistence/               # ORM 查询及持久化实现
-│   │   ├── auth/                      # Django 身份验证与双 Token 适配
-│   │   ├── redis_queue/               # Redis Streams 发布、消费与确认
-│   │   ├── sms/                       # 短信服务适配
-│   │   ├── storage/                   # 可配置的本地原始数据和模型制品存储
-│   │   └── inference_adapter.py       # 业务任务与计算输入输出转换
-│   └── management/commands/
-│       └── run_inference.py           # 独立推理进程入口
-└── health_inference/                  # 普通 Python 计算包，非 Django App
-    ├── runtime.py                     # 常驻模型实例
-    ├── batching.py                    # 请求聚合与批量执行
-    ├── types.py                       # 计算过程的数据类型
-    └── algorithms/                    # 具体算法
+.
+├── pyproject.toml                     # workspace 根：共享开发工具与检查配置
+├── uv.lock                            # 两个成员共用的唯一锁文件
+├── manage.py                          # 仓库级 Django 管理入口
+└── packages/
+    ├── health-service/
+    │   ├── pyproject.toml             # Django 业务成员与运行依赖
+    │   └── src/
+    │       ├── config/                # Django ASGI 配置、URL 与设置
+    │       └── health_service/        # Django App：业务与持久化
+    │           ├── models/
+    │           ├── migrations/
+    │           ├── domain/
+    │           ├── application/
+    │           ├── schemas/
+    │           ├── api/
+    │           ├── infrastructure/
+    │           └── management/commands/
+    │               └── run_inference.py # 独立消费者入口
+    └── health-inference/
+        ├── pyproject.toml             # 纯计算成员，无第三方运行依赖
+        └── src/health_inference/
+            ├── types.py               # 计算过程的数据类型
+            ├── registry.py            # 受控算法注册
+            └── algorithms/            # 可执行算法
 ```
+
+### uv workspace 与依赖归属
+
+根目录 `pyproject.toml` 只显式编排 `health-service` 和 `health-inference`，不形成第三个业务项目；Python 基线为 3.13，成员共用根目录的 `uv.lock` 和默认 `.venv`。`health-service` 包含 Django `health_service` 与 `config`，声明所有业务运行依赖（包括直接使用的 `asgiref`），并显式依赖本地 `health-inference`；`health-inference` 不依赖业务成员，当前不声明第三方运行依赖。
+
+```sh
+# 完整开发与测试环境
+uv sync --locked --all-packages
+# 仅业务成员及其运行依赖
+uv sync --locked --package health-service --no-dev
+# 仅计算成员及其运行依赖
+uv sync --locked --package health-inference --no-dev
+```
+
+服务和管理命令从仓库根目录通过 `uv run --locked --package health-service ...` 执行；`--package` 选择依赖环境，不代替工作目录切换。业务模块从已安装的 workspace 成员导入，无需额外源码搜索路径。
 
 ### 职责与依赖
 
