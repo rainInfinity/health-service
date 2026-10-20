@@ -15,6 +15,7 @@ from health_service.application.catalog import (
     publish_model_version,
     select_channel_model_version,
 )
+from health_service.application.tasks import create_task_draft
 from health_service.models import Task
 
 
@@ -211,3 +212,235 @@ def test_user_task_routes_enforce_owner_channel_and_request_contract():
     assert failure_data["failureMessage"] == "输入格式无效"
     assert not {"failureDetail", "profileSnapshot"}.intersection(failure_data)
     assert "/private/health.csv" not in json.dumps(failure_data, ensure_ascii=False)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_quality_rejection_task_details_are_whitelisted_and_discriminated():
+    """验证质量拒绝详情只公开受控原因、白名单明细和实际 OpenAPI 联合类型。"""
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(
+        username="task-quality-owner",
+        password="Juniper-quality-owner-519!strong",
+    )
+    user_model.objects.create_user(
+        username="task-quality-other",
+        password="Juniper-quality-other-619!strong",
+    )
+    model = create_model(
+        code="task-quality-api",
+        name="Task Quality API",
+        description=None,
+    )
+    version_draft = create_model_version(
+        model_id=model.model_id,
+        version="1.0",
+        algorithm_key="hr_br.example",
+        params=None,
+    )
+    version = publish_model_version(version_id=version_draft.version_id)
+    select_channel_model_version(
+        channel="ios-cn",
+        model_id=model.model_id,
+        version_id=version.version_id,
+    )
+
+    quality_details = {
+        "low_score": {
+            "failure_code": "INFERENCE.QUALITY_REJECTED",
+            "failure_detail": {
+                "quality": {
+                    "reason": "LOW_SCORE",
+                    "details": {
+                        "score": 61.25,
+                        "threshold": 70,
+                        "privateDiagnostic": "RAW_DIAGNOSTIC_SENTINEL",
+                    },
+                    "privateReason": "PRIVATE_REASON_SENTINEL",
+                },
+                "privatePath": "/private/quality.csv",
+                "profileSnapshot": "PROFILE_SNAPSHOT_SENTINEL",
+            },
+        },
+        "no_valid_signal": {
+            "failure_code": "INFERENCE.QUALITY_REJECTED",
+            "failure_detail": {
+                "quality": {
+                    "reason": "NO_VALID_SIGNAL",
+                    "details": None,
+                    "privateDiagnostic": "NO_SIGNAL_DIAGNOSTIC_SENTINEL",
+                },
+                "privatePath": "/private/no-signal.csv",
+            },
+        },
+        "ordinary_failure": {
+            "failure_code": "INFERENCE.INVALID_INPUT",
+            "failure_detail": {
+                "quality": {
+                    "reason": "LOW_SCORE",
+                    "details": {"score": 1, "threshold": 2},
+                },
+                "privatePath": "/private/ordinary.csv",
+            },
+        },
+        "missing_detail": {
+            "failure_code": "INFERENCE.QUALITY_REJECTED",
+            "failure_detail": None,
+        },
+        "corrupt_detail": {
+            "failure_code": "INFERENCE.QUALITY_REJECTED",
+            "failure_detail": {
+                "quality": {
+                    "reason": "LOW_SCORE",
+                    "details": {"score": 70, "threshold": 70},
+                },
+            },
+        },
+    }
+    task_ids = {}
+    for name, values in quality_details.items():
+        task = create_task_draft(
+            user_id=owner.pk,
+            channel="ios-cn",
+            model_id=model.model_id,
+        )
+        Task.objects.filter(pk=task.task_id).update(
+            status=Task.StatusChoices.FAILED,
+            finished_at=timezone.now(),
+            failure_code=values["failure_code"],
+            failure_message="质量要求未达到",
+            failure_detail=values["failure_detail"],
+        )
+        task_ids[name] = task.task_id
+
+    async def read_api():
+        """通过认证 HTTP 路径读取任务详情、列表和真实 OpenAPI。"""
+        client = AsyncClient()
+        owner_login = await _login(
+            client,
+            "ios-cn",
+            "task-quality-owner",
+            "Juniper-quality-owner-519!strong",
+        )
+        owner_other_channel_login = await _login(
+            client,
+            "wxapp",
+            "task-quality-owner",
+            "Juniper-quality-owner-519!strong",
+        )
+        other_login = await _login(
+            client,
+            "ios-cn",
+            "task-quality-other",
+            "Juniper-quality-other-619!strong",
+        )
+        owner_headers = {
+            "Authorization": f"Bearer {owner_login.json()['data']['accessToken']}"
+        }
+        other_channel_headers = {
+            "Authorization": (
+                f"Bearer {owner_other_channel_login.json()['data']['accessToken']}"
+            )
+        }
+        other_headers = {
+            "Authorization": f"Bearer {other_login.json()['data']['accessToken']}"
+        }
+        details = {
+            name: await client.get(
+                f"/api/v1/ios-cn/tasks/{task_id}",
+                headers=owner_headers,
+            )
+            for name, task_id in task_ids.items()
+        }
+        page = await client.get(
+            "/api/v1/ios-cn/tasks?offset=0&limit=20",
+            headers=owner_headers,
+        )
+        wrong_account = await client.get(
+            f"/api/v1/ios-cn/tasks/{task_ids['low_score']}",
+            headers=other_headers,
+        )
+        wrong_channel = await client.get(
+            f"/api/v1/wxapp/tasks/{task_ids['low_score']}",
+            headers=other_channel_headers,
+        )
+        openapi = await client.get("/api/v1/openapi.json")
+        await _close_worker_database_connection()
+        return details, page, wrong_account, wrong_channel, openapi
+
+    details, page, wrong_account, wrong_channel, openapi = asyncio.run(read_api())
+    expected_quality = {
+        "low_score": {
+            "reason": "LOW_SCORE",
+            "details": {"score": 61.25, "threshold": 70},
+        },
+        "no_valid_signal": {
+            "reason": "NO_VALID_SIGNAL",
+            "details": None,
+        },
+        "ordinary_failure": None,
+        "missing_detail": None,
+        "corrupt_detail": None,
+    }
+    private_markers = (
+        "RAW_DIAGNOSTIC_SENTINEL",
+        "PRIVATE_REASON_SENTINEL",
+        "NO_SIGNAL_DIAGNOSTIC_SENTINEL",
+        "PROFILE_SNAPSHOT_SENTINEL",
+        "/private/",
+    )
+    for name, response in details.items():
+        assert response.status_code == 200
+        body = response.json()
+        assert body["code"] == "OK"
+        data = body["data"]
+        assert data["status"] == Task.StatusChoices.FAILED
+        assert data["result"] is None
+        assert data["qualityFailure"] == expected_quality[name]
+        assert not {"failureDetail", "profileSnapshot"}.intersection(data)
+        assert not any(marker in json.dumps(data, ensure_ascii=False) for marker in private_markers)
+
+    assert page.status_code == 200
+    assert page.json()["code"] == "OK"
+    assert page.json()["data"]["total"] == len(quality_details)
+    assert all(
+        "qualityFailure" not in item
+        and "failureDetail" not in item
+        and "profileSnapshot" not in item
+        for item in page.json()["data"]["items"]
+    )
+    assert wrong_account.status_code == wrong_channel.status_code == 404
+    assert openapi.status_code == 200
+
+    schema = openapi.json()
+    components = schema["components"]["schemas"]
+    operation = schema["paths"]["/api/v1/{channel}/tasks/{task_id}"]["get"]
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    envelope_name = response_schema["$ref"].rsplit("/", maxsplit=1)[-1]
+    detail_schema = components[envelope_name]["properties"]["data"]
+    detail_name = detail_schema["$ref"].rsplit("/", maxsplit=1)[-1]
+    quality_schema = components[detail_name]["properties"]["qualityFailure"]
+
+    def find_discriminated_union(value):
+        """在可空包装内查找实际生成的判别联合定义。"""
+        if isinstance(value, dict):
+            if value.get("discriminator", {}).get("propertyName") == "reason":
+                return value
+            for child in value.values():
+                found = find_discriminated_union(child)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = find_discriminated_union(child)
+                if found is not None:
+                    return found
+        return None
+
+    quality_union = find_discriminated_union(quality_schema)
+    assert quality_union is not None
+    assert quality_union["discriminator"]["propertyName"] == "reason"
+    assert set(quality_union["discriminator"]["mapping"]) == {
+        "LOW_SCORE",
+        "NO_VALID_SIGNAL",
+    }
+    assert len(quality_union["oneOf"]) == 2

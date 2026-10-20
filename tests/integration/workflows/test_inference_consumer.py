@@ -1,5 +1,7 @@
 """通过真实 Redis Stream 验证独立推理消费者的确认与恢复语义。"""
 
+import asyncio
+import json
 import signal
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -8,12 +10,23 @@ from time import sleep
 from uuid import uuid4
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
-from django.db import OperationalError
-from django.test import override_settings
+from django.db import OperationalError, connections
+from django.test import AsyncClient, override_settings
 from django.utils import timezone
+from health_inference import (
+    AlgorithmDefinition,
+    InferenceInput,
+    InferenceOutput,
+    LowScoreDetails,
+    QualityRejectedError,
+    QualityRejection,
+    QualityRejectionReason,
+)
+from health_inference.registry import _ALGORITHMS
 from health_service.application.catalog import (
     create_metric_definition,
     create_model,
@@ -22,6 +35,7 @@ from health_service.application.catalog import (
     select_channel_model_version,
     set_model_version_metrics,
 )
+from health_service.infrastructure.inference_adapter import clear_version_runtime_cache
 from health_service.infrastructure.inference_adapter import (
     run_task_inference as run_actual_task_inference,
 )
@@ -149,6 +163,76 @@ def _create_example_task_for_version(version_id: int) -> Task:
     _store_ppg_input(task, uploaded_at=now)
     return task
 
+@pytest.fixture
+def isolated_quality_algorithm(monkeypatch):
+    """临时装入拒绝算法并在测试后清理版本运行时缓存。"""
+    algorithm_key = f"test.quality.{uuid4().hex}"
+    scheduled_rejections: list[QualityRejection] = []
+    invocations: list[QualityRejection] = []
+
+    def reject_quality(_: InferenceInput) -> InferenceOutput:
+        """触发本测试指定的质量拒绝并记录执行次数。"""
+        if not scheduled_rejections:
+            raise AssertionError("测试未指定质量拒绝")
+        rejection = scheduled_rejections[0]
+        invocations.append(rejection)
+        error = QualityRejectedError(rejection)
+        error.args = ("PRIVATE-QUALITY-SENTINEL",)
+        error.safe_message = "PRIVATE-QUALITY-SENTINEL"
+        raise error
+
+    definition = AlgorithmDefinition(
+        key=algorithm_key,
+        is_example=False,
+        required_inputs=(),
+        required_artifacts=(),
+        required_profile_fields=(),
+        parameter_validator=lambda _: None,
+        result_validator=lambda _: None,
+        runner=reject_quality,
+        metric_contracts=(),
+    )
+    clear_version_runtime_cache()
+    monkeypatch.setitem(_ALGORITHMS, algorithm_key, definition)
+    try:
+        yield algorithm_key, scheduled_rejections, invocations
+    finally:
+        clear_version_runtime_cache()
+
+
+def _create_quality_rejection_task(*, algorithm_key: str) -> Task:
+    """为临时质量算法创建无输入、无指标的待执行任务。"""
+    user = get_user_model().objects.create_user(
+        username=f"consumer-quality-{uuid4().hex}",
+        password="Dawn-valley-483!strong",
+    )
+    model = create_model(
+        code=f"consumer-quality-{uuid4().hex}",
+        name="Quality rejection test",
+        description=None,
+    )
+    draft = create_model_version(
+        model_id=model.model_id,
+        version="1.0",
+        algorithm_key=algorithm_key,
+        params=None,
+    )
+    version = publish_model_version(version_id=draft.version_id)
+    select_channel_model_version(
+        channel="ios-cn",
+        model_id=model.model_id,
+        version_id=version.version_id,
+    )
+    now = timezone.now()
+    return Task.objects.create(
+        user=user,
+        channel=Channel.objects.get(label="ios-cn"),
+        model_version_id=version.version_id,
+        status=Task.StatusChoices.SUBMITTED,
+        profile_snapshot={},
+        submitted_at=now,
+    )
+
 
 def _run_once(consumer: str = "test-consumer") -> None:
     """通过 Django 命令入口实际运行一轮消费。"""
@@ -187,6 +271,337 @@ def test_once_dispatches_and_executes_example_task(tmp_path, inference_stream, c
     assert all(record["taskId"] == str(task.pk) for record in task_records)
     assert len({record["messageId"] for record in task_records}) == 1
     assert float(records[-2]["durationMs"]) >= 0
+
+@pytest.mark.parametrize(
+    ("rejection", "expected_detail"),
+    [
+        (
+            QualityRejection(
+                QualityRejectionReason.LOW_SCORE,
+                LowScoreDetails(40, 70),
+            ),
+            {
+                "quality": {
+                    "reason": "LOW_SCORE",
+                    "details": {"score": 40, "threshold": 70},
+                }
+            },
+        ),
+        (
+            QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None),
+            {
+                "quality": {
+                    "reason": "NO_VALID_SIGNAL",
+                    "details": None,
+                }
+            },
+        ),
+    ],
+    ids=("low-score", "no-valid-signal"),
+)
+@pytest.mark.django_db(transaction=True)
+def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
+    tmp_path,
+    inference_stream,
+    isolated_quality_algorithm,
+    monkeypatch,
+    capsys,
+    rejection: QualityRejection,
+    expected_detail: dict[str, object],
+):
+    """真实单轮消费者先提交拒绝，再确认重复任务消息且只执行一次。"""
+    client, stream, group = inference_stream
+    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
+    scheduled_rejections.append(rejection)
+    actual_xack = Redis.xack
+    task: Task
+
+    def acknowledge_after_terminal(redis_client, *args, **kwargs):
+        """确认消息前核对质量拒绝已经提交为失败终态。"""
+        task.refresh_from_db()
+        assert task.status == Task.StatusChoices.FAILED
+        return actual_xack(redis_client, *args, **kwargs)
+
+    monkeypatch.setattr(Redis, "xack", acknowledge_after_terminal)
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        client.xadd(stream, {"task_id": str(task.pk)})
+        client.xadd(stream, {"task_id": str(task.pk)})
+        _run_once()
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.FAILED
+    assert task.failure_code == "INFERENCE.QUALITY_REJECTED"
+    assert task.failure_detail == expected_detail
+    assert task.result_payload is None
+    assert task.finished_at is not None
+    assert task.execution_token is None
+    assert task.lease_expires_at is None
+    assert task.attempt_count == 1
+    assert invocations == [rejection]
+    assert not TaskMetric.objects.filter(task=task).exists()
+    assert client.xpending(stream, group)["pending"] == 0
+
+    output = capsys.readouterr().out
+    records = parse_console_records(output)
+    failed = [record for record in records if record["event"] == "inference.task.failed"]
+    assert len(failed) == 1
+    assert failed[0]["errorCode"] == task.failure_code
+    assert failed[0]["taskId"] == str(task.pk)
+    assert "PRIVATE-QUALITY-SENTINEL" not in output
+    assert rejection.reason.value not in output
+    assert all(
+        not {"quality", "score", "threshold"}.intersection(record)
+        for record in records
+    )
+
+
+@pytest.mark.parametrize(
+    ("rejection", "expected_quality"),
+    [
+        (
+            QualityRejection(
+                QualityRejectionReason.LOW_SCORE,
+                LowScoreDetails(40, 70),
+            ),
+            {
+                "reason": "LOW_SCORE",
+                "details": {"score": 40, "threshold": 70},
+            },
+        ),
+        (
+            QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None),
+            {"reason": "NO_VALID_SIGNAL", "details": None},
+        ),
+    ],
+    ids=("low-score", "no-valid-signal"),
+)
+@pytest.mark.django_db(transaction=True)
+def test_quality_rejection_runs_through_http_and_terminal_replay(
+    tmp_path,
+    inference_stream,
+    isolated_quality_algorithm,
+    rejection: QualityRejection,
+    expected_quality: dict[str, object],
+):
+    """串联单轮消费者、真实 HTTP 详情读取与已终态消息重放。"""
+    redis_client, stream, group = inference_stream
+    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
+    scheduled_rejections.append(rejection)
+
+    async def query_detail(username: str, task_id: int):
+        """通过登录接口认证并读取同一质量拒绝任务。"""
+        client = AsyncClient()
+        login = await client.post(
+            "/api/v1/ios-cn/auth/login",
+            data=json.dumps(
+                {
+                    "username": username,
+                    "password": "Dawn-valley-483!strong",
+                }
+            ),
+            content_type="application/json",
+        )
+        try:
+            detail = await client.get(
+                f"/api/v1/ios-cn/tasks/{task_id}",
+                headers={
+                    "Authorization": (
+                        f"Bearer {login.json()['data']['accessToken']}"
+                    )
+                },
+            )
+            return login, detail
+        finally:
+            await sync_to_async(connections.close_all, thread_sensitive=True)()
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        username = task.user.username
+        redis_client.xadd(stream, {"task_id": str(task.pk)})
+        _run_once()
+
+        first_login, first_response = asyncio.run(query_detail(username, task.pk))
+        redis_client.xadd(stream, {"task_id": str(task.pk)})
+        _run_once("quality-terminal-replay")
+        second_login, second_response = asyncio.run(query_detail(username, task.pk))
+
+    task.refresh_from_db()
+    expected_private_detail = {"quality": expected_quality}
+    assert task.status == Task.StatusChoices.FAILED
+    assert task.failure_code == "INFERENCE.QUALITY_REJECTED"
+    assert task.failure_detail == expected_private_detail
+    assert task.result_payload is None
+    assert task.finished_at is not None
+    assert task.attempt_count == 1
+    assert invocations == [rejection]
+    assert not TaskMetric.objects.filter(task=task).exists()
+    assert redis_client.xpending(stream, group)["pending"] == 0
+
+    assert first_login.status_code == second_login.status_code == 200
+    assert first_response.status_code == second_response.status_code == 200
+    first_body = first_response.json()
+    second_body = second_response.json()
+    assert first_body["code"] == second_body["code"] == "OK"
+    first_data = first_body["data"]
+    assert second_body["data"] == first_data
+    assert first_data["status"] == Task.StatusChoices.FAILED
+    assert first_data["failureCode"] == "INFERENCE.QUALITY_REJECTED"
+    assert first_data["result"] is None
+    assert first_data["qualityFailure"] == expected_quality
+    assert not {"failureDetail", "profileSnapshot"}.intersection(first_data)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_quality_rejection_after_lease_loss_is_not_saved_or_acked(
+    tmp_path,
+    inference_stream,
+    isolated_quality_algorithm,
+    monkeypatch,
+    capsys,
+):
+    """测试算法报告拒绝时若已失权，消费者不写终态也不确认消息。"""
+    client, stream, group = inference_stream
+    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
+    rejection = QualityRejection(
+        QualityRejectionReason.LOW_SCORE,
+        LowScoreDetails(40, 70),
+    )
+    scheduled_rejections.append(rejection)
+
+    def delayed_inference(*, task_id: int, execution_token):
+        """等待心跳判定失权后仍经真实适配器执行测试算法。"""
+        sleep(0.12)
+        return run_actual_task_inference(
+            task_id=task_id,
+            execution_token=execution_token,
+        )
+
+    def lose_lease(*, task_id: int, execution_token) -> bool:
+        """模拟数据库租约续约拒绝。"""
+        return False
+
+    monkeypatch.setattr(inference_command, "run_task_inference", delayed_inference)
+    monkeypatch.setattr(inference_command, "renew_task_execution_lease", lose_lease)
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        INFERENCE_LEASE_SECONDS=0.3,
+        INFERENCE_HEARTBEAT_SECONDS=0.03,
+    ):
+        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        _run_once()
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.RUNNING
+    assert task.failure_code is None
+    assert task.failure_message is None
+    assert task.failure_detail is None
+    assert task.finished_at is None
+    assert task.execution_token is not None
+    assert task.attempt_count == 1
+    assert invocations == [rejection]
+    assert client.xpending(stream, group)["pending"] == 1
+
+    output = capsys.readouterr().out
+    records = parse_console_records(output)
+    events = [record["event"] for record in records]
+    assert "inference.task.lease_lost" in events
+    assert "inference.task.failed" not in events
+    assert "PRIVATE-QUALITY-SENTINEL" not in output
+    assert rejection.reason.value not in output
+    assert all(
+        not {"quality", "score", "threshold"}.intersection(record)
+        for record in records
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_quality_rejection_ack_failure_replays_only_terminal_ack(
+    tmp_path,
+    inference_stream,
+    isolated_quality_algorithm,
+    monkeypatch,
+    capsys,
+):
+    """质量拒绝提交后 ACK 故障重放只确认终态，不重新执行算法。"""
+    from django.core.management.base import CommandError
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    client, stream, group = inference_stream
+    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
+    rejection = QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None)
+    expected_detail = {
+        "quality": {"reason": "NO_VALID_SIGNAL", "details": None}
+    }
+    scheduled_rejections.append(rejection)
+    task: Task
+
+    def fail_ack(redis_client, *args, **kwargs):
+        """确认前验证质量终态已落库，再模拟 Redis 确认故障。"""
+        task.refresh_from_db()
+        assert task.status == Task.StatusChoices.FAILED
+        raise RedisConnectionError("PRIVATE-REDIS-SENTINEL")
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        with monkeypatch.context() as patch:
+            patch.setattr(Redis, "xack", fail_ack)
+            with pytest.raises(CommandError):
+                _run_once()
+
+        task.refresh_from_db()
+        assert task.status == Task.StatusChoices.FAILED
+        assert task.failure_code == "INFERENCE.QUALITY_REJECTED"
+        assert task.failure_detail == expected_detail
+        assert task.attempt_count == 1
+        assert client.xpending(stream, group)["pending"] == 1
+        first_output = capsys.readouterr().out
+
+        message_id = client.xrange(stream)[0][0]
+        client.xclaim(
+            stream,
+            group,
+            "previous-quality-consumer",
+            min_idle_time=0,
+            message_ids=[message_id],
+            idle=settings.INFERENCE_LEASE_SECONDS * 1000 + 1,
+        )
+        _run_once("quality-replay")
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.FAILED
+    assert task.failure_detail == expected_detail
+    assert task.attempt_count == 1
+    assert invocations == [rejection]
+    assert client.xpending(stream, group)["pending"] == 0
+    first_records = parse_console_records(first_output)
+    replay_output = capsys.readouterr().out
+    replay_records = parse_console_records(replay_output)
+    first_events = [record["event"] for record in first_records]
+    replay_events = [record["event"] for record in replay_records]
+    assert "inference.task.failed" in first_events
+    assert "inference.worker.error" in first_events
+    assert "inference.message.received" in replay_events
+    assert "inference.task.started" not in replay_events
+    assert "inference.task.failed" not in replay_events
+    output = first_output + replay_output
+    assert "PRIVATE-QUALITY-SENTINEL" not in output
+    assert "PRIVATE-REDIS-SENTINEL" not in output
+    assert rejection.reason.value not in output
+    assert all(
+        not {"quality", "score", "threshold"}.intersection(record)
+        for record in first_records + replay_records
+    )
 
 
 @pytest.mark.django_db(transaction=True)

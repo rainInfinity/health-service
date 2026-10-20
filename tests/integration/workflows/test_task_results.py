@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.db.models import QuerySet
 from django.test import override_settings
 from django.utils import timezone
 from health_inference import (
@@ -15,7 +16,11 @@ from health_inference import (
     InferenceError,
     InferenceInput,
     InferenceOutput,
+    LowScoreDetails,
     MetricContract,
+    QualityRejectedError,
+    QualityRejection,
+    QualityRejectionReason,
     register_algorithm,
 )
 from health_service.application.catalog import (
@@ -267,32 +272,46 @@ def test_metric_constraint_failure_rolls_back_success_transition():
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_code", "expected_message"),
+    ("error", "expected_code", "private_text"),
     [
         (
-            InferenceError("TASK.UNKNOWN_ALGORITHM", "健康资料:/sensitive/path"),
+            InferenceError("TASK.UNKNOWN_ALGORITHM", "HEALTH-PROFILE-SENTINEL"),
             "TASK.UNKNOWN_ALGORITHM",
-            "算法不可用",
+            "HEALTH-PROFILE-SENTINEL",
         ),
         (
-            InferenceError("INFERENCE.INVALID_INPUT", "原始输入:病史字段"),
+            InferenceError("INFERENCE.INVALID_INPUT", "RAW-INPUT-SENTINEL"),
             "INFERENCE.INVALID_INPUT",
-            "推理输入无效",
+            "RAW-INPUT-SENTINEL",
         ),
         (
-            InferenceError("RESULT.PRIVATE_DETAIL", "/private/absolute/path"),
+            InferenceError("RESULT.PRIVATE_DETAIL", "PRIVATE-PATH-SENTINEL"),
             "RESULT.INVALID_OUTPUT",
-            "推理结果格式无效",
+            "PRIVATE-PATH-SENTINEL",
         ),
-        (None, "INFERENCE.EXECUTION_ERROR", "推理执行失败"),
+        (None, "INFERENCE.EXECUTION_ERROR", None),
+        (
+            InferenceError(
+                "INFERENCE.QUALITY_REJECTED",
+                "FORGED-QUALITY-SENTINEL",
+            ),
+            "INFERENCE.EXECUTION_ERROR",
+            "FORGED-QUALITY-SENTINEL",
+        ),
     ],
-    ids=("task-code", "inference-code", "result-code-sanitized", "unexpected-error"),
+    ids=(
+        "task-code",
+        "inference-code",
+        "result-code-sanitized",
+        "unexpected-error",
+        "forged-quality-code",
+    ),
 )
 @pytest.mark.django_db(transaction=True)
-def test_failure_persists_only_safe_code_and_fixed_message(
-    error, expected_code, expected_message
+def test_failure_persists_safe_code_without_private_diagnostics(
+    error, expected_code, private_text
 ):
-    """失败终态只保存受控分类和固定摘要，不保留错误正文或详情。"""
+    """失败终态只保存受控代码，不保留异常正文或任意明细。"""
     task, token, _, _ = _create_running_task()
 
     assert record_task_execution_failure(
@@ -304,11 +323,144 @@ def test_failure_persists_only_safe_code_and_fixed_message(
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
     assert task.failure_code == expected_code
-    assert task.failure_message == expected_message
+    assert task.failure_message is not None
+    if private_text is not None:
+        assert private_text not in task.failure_message
     assert task.failure_detail is None
     assert task.finished_at is not None
     assert task.execution_token is None
     assert task.lease_expires_at is None
+
+
+@pytest.mark.parametrize(
+    ("rejection", "expected_detail"),
+    [
+        (
+            QualityRejection(
+                QualityRejectionReason.LOW_SCORE,
+                LowScoreDetails(40, 70),
+            ),
+            {
+                "quality": {
+                    "reason": "LOW_SCORE",
+                    "details": {"score": 40, "threshold": 70},
+                }
+            },
+        ),
+        (
+            QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None),
+            {
+                "quality": {
+                    "reason": "NO_VALID_SIGNAL",
+                    "details": None,
+                }
+            },
+        ),
+    ],
+    ids=("low-score", "no-valid-signal"),
+)
+@pytest.mark.django_db(transaction=True)
+def test_quality_rejection_commits_whitelisted_failure_terminal(
+    rejection: QualityRejection,
+    expected_detail: dict[str, object],
+):
+    """两类质量拒绝原子保存失败终态且不生成成功结果或指标。"""
+    task, token, _, _ = _create_running_task()
+    error = QualityRejectedError(rejection)
+    error.args = ("PRIVATE-QUALITY-SENTINEL",)
+    error.safe_message = "PRIVATE-QUALITY-SENTINEL"
+
+    assert record_task_execution_failure(
+        task_id=task.pk,
+        execution_token=token,
+        error=error,
+    ) == "INFERENCE.QUALITY_REJECTED"
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.FAILED
+    assert task.failure_code == "INFERENCE.QUALITY_REJECTED"
+    assert task.failure_message is not None
+    assert "PRIVATE-QUALITY-SENTINEL" not in task.failure_message
+    assert task.failure_detail == expected_detail
+    assert task.finished_at is not None
+    assert task.execution_token is None
+    assert task.lease_expires_at is None
+    assert task.result_payload is None
+    assert not TaskMetric.objects.filter(task=task).exists()
+
+@pytest.mark.parametrize("corruption", ["unknown-reason", "invalid-score"])
+@pytest.mark.django_db(transaction=True)
+def test_corrupt_quality_rejection_is_generic_failure(corruption: str):
+    """未知原因或损坏评分不能通过服务层校验成为质量结论。"""
+    task, token, _, _ = _create_running_task()
+    rejection = QualityRejection(
+        QualityRejectionReason.LOW_SCORE,
+        LowScoreDetails(40, 70),
+    )
+    if corruption == "unknown-reason":
+        object.__setattr__(rejection, "reason", "UNKNOWN")
+    else:
+        object.__setattr__(rejection.details, "score", 70)
+    error = QualityRejectedError(
+        QualityRejection(
+            QualityRejectionReason.LOW_SCORE,
+            LowScoreDetails(40, 70),
+        )
+    )
+    error.rejection = rejection
+    error.args = ("PRIVATE-CORRUPT-QUALITY-SENTINEL",)
+    error.safe_message = "PRIVATE-CORRUPT-QUALITY-SENTINEL"
+
+    assert record_task_execution_failure(
+        task_id=task.pk,
+        execution_token=token,
+        error=error,
+    ) == "INFERENCE.EXECUTION_ERROR"
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.FAILED
+    assert task.failure_code == "INFERENCE.EXECUTION_ERROR"
+    assert task.failure_message is not None
+    assert "PRIVATE-CORRUPT-QUALITY-SENTINEL" not in task.failure_message
+    assert task.failure_detail is None
+
+
+
+@pytest.mark.django_db(transaction=True)
+def test_quality_failure_transaction_rolls_back_all_fields(monkeypatch):
+    """终态更新之后发生数据库错误时回滚全部失败字段。"""
+    task, token, _, _ = _create_running_task()
+    original_update = QuerySet.update
+
+    def update_then_fail(queryset: QuerySet, **fields: object) -> int:
+        """在失败终态 SQL 执行后模拟事务内数据库故障。"""
+        updated = original_update(queryset, **fields)
+        if fields.get("failure_code") == "INFERENCE.QUALITY_REJECTED":
+            raise IntegrityError("PRIVATE-DATABASE-SENTINEL")
+        return updated
+
+    monkeypatch.setattr(QuerySet, "update", update_then_fail)
+    with pytest.raises(IntegrityError):
+        record_task_execution_failure(
+            task_id=task.pk,
+            execution_token=token,
+            error=QualityRejectedError(
+                QualityRejection(
+                    QualityRejectionReason.LOW_SCORE,
+                    LowScoreDetails(40, 70),
+                )
+            ),
+        )
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.RUNNING
+    assert task.failure_code is None
+    assert task.failure_message is None
+    assert task.failure_detail is None
+    assert task.finished_at is None
+    assert task.execution_token == token
+    assert task.lease_expires_at is not None
+    assert not TaskMetric.objects.filter(task=task).exists()
 
 
 @pytest.mark.parametrize("stale_kind", ["token", "expired"])
@@ -327,7 +479,12 @@ def test_stale_or_expired_execution_cannot_commit_failure(stale_kind):
     assert record_task_execution_failure(
         task_id=task.pk,
         execution_token=supplied_token,
-        error=InferenceError("INFERENCE.INVALID_INPUT", "不可保存的原始内容"),
+        error=QualityRejectedError(
+            QualityRejection(
+                QualityRejectionReason.LOW_SCORE,
+                LowScoreDetails(40, 70),
+            )
+        ),
     ) is None
 
     task.refresh_from_db()
@@ -336,6 +493,8 @@ def test_stale_or_expired_execution_cannot_commit_failure(stale_kind):
     assert task.failure_message is None
     assert task.failure_detail is None
     assert task.finished_at is None
+    assert task.execution_token == token
+    assert task.lease_expires_at is not None
     assert not TaskMetric.objects.filter(task=task).exists()
 
 
@@ -361,7 +520,12 @@ def test_old_execution_failure_cannot_overwrite_reclaimed_success():
     assert record_task_execution_failure(
         task_id=task.pk,
         execution_token=old_token,
-        error=InferenceError("INFERENCE.INVALID_INPUT", "旧执行结果"),
+        error=QualityRejectedError(
+            QualityRejection(
+                QualityRejectionReason.NO_VALID_SIGNAL,
+                None,
+            )
+        ),
     ) is None
 
     task.refresh_from_db()
@@ -407,8 +571,13 @@ def test_output_file_is_authoritative_only_after_valid_success_commit(
             assert record_task_execution_failure(
                 task_id=task.pk,
                 execution_token=token,
-                error=InferenceError("INFERENCE.INVALID_INPUT", "不公开的诊断"),
-            ) == "INFERENCE.INVALID_INPUT"
+                error=QualityRejectedError(
+                    QualityRejection(
+                        QualityRejectionReason.LOW_SCORE,
+                        LowScoreDetails(40, 70),
+                    )
+                ),
+            ) == "INFERENCE.QUALITY_REJECTED"
         else:
             Task.objects.filter(pk=task.pk).update(
                 lease_expires_at=timezone.now() - timedelta(seconds=1)

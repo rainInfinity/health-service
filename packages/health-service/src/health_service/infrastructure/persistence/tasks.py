@@ -64,6 +64,7 @@ _TASK_DETAIL_FIELDS = (
     "result_payload",
     "failure_code",
     "failure_message",
+    "failure_detail",
 )
 
 
@@ -497,8 +498,9 @@ def record_task_execution_failure(
     execution_token: UUID,
     failure_code: str,
     failure_message: str,
+    failure_detail: dict[str, object] | None,
 ) -> bool:
-    """仅在匹配且未过期租约内原子终结任务并清空执行字段。"""
+    """仅在匹配且未过期租约内原子终结任务并保存受控失败明细。"""
     with transaction.atomic():
         task = (
             Task.objects.select_for_update(of=("self",))
@@ -522,7 +524,7 @@ def record_task_execution_failure(
             status=Task.StatusChoices.FAILED,
             failure_code=failure_code,
             failure_message=failure_message,
-            failure_detail=None,
+            failure_detail=failure_detail,
             finished_at=Now(),
             execution_token=None,
             lease_expires_at=None,
@@ -610,4 +612,5 @@ def _task_record_data(
         result_payload=task.result_payload if include_detail else None,
         failure_code=task.failure_code if include_detail else None,
         failure_message=task.failure_message if include_detail else None,
+        failure_detail=task.failure_detail if include_detail else None,
     )

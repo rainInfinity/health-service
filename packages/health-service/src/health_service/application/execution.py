@@ -10,6 +10,9 @@ from health_inference import (
     AlgorithmDefinition,
     InferenceError,
     InferenceOutput,
+    QualityRejectedError,
+    QualityRejection,
+    QualityRejectionReason,
     get_algorithm,
 )
 
@@ -42,6 +45,11 @@ _SAFE_FAILURE_MESSAGES = {
     "RESULT.INVALID_OUTPUT": "推理结果格式无效",
 }
 
+_QUALITY_FAILURE_MESSAGES = {
+    QualityRejectionReason.LOW_SCORE: "信号质量评分未达到要求，请重新采集",
+    QualityRejectionReason.NO_VALID_SIGNAL: "未检测到可用信号，请重新采集",
+}
+
 
 def record_task_execution_failure(
     *,
@@ -50,28 +58,79 @@ def record_task_execution_failure(
     error: InferenceError | None,
 ) -> str | None:
     """提交安全失败终态后返回实际失败码；失权时返回空值。"""
-    failure_code, failure_message = _safe_failure_fields(error)
+    failure_code, failure_message, failure_detail = _safe_failure_fields(error)
     committed = persistence.record_task_execution_failure(
         task_id=task_id,
         execution_token=execution_token,
         failure_code=failure_code,
         failure_message=failure_message,
+        failure_detail=failure_detail,
     )
     return failure_code if committed else None
 
 
-def _safe_failure_fields(error: InferenceError | None) -> tuple[str, str]:
-    """只保留已知稳定错误码，忽略任意异常正文并返回固定安全摘要。"""
+def _safe_failure_fields(
+    error: InferenceError | None,
+) -> tuple[str, str, dict[str, object] | None]:
+    """将受控质量拒绝白名单化，其余错误映射为固定安全失败。"""
+    if isinstance(error, QualityRejectedError):
+        rejection = _validated_quality_rejection(error)
+        if rejection is None:
+            return (
+                "INFERENCE.EXECUTION_ERROR",
+                _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"],
+                None,
+            )
+        details = None
+        if rejection.details is not None:
+            details = {
+                "score": rejection.details.score,
+                "threshold": rejection.details.threshold,
+            }
+        return (
+            "INFERENCE.QUALITY_REJECTED",
+            _QUALITY_FAILURE_MESSAGES[rejection.reason],
+            {
+                "quality": {
+                    "reason": rejection.reason.value,
+                    "details": details,
+                }
+            },
+        )
     if error is not None and isinstance(error.code, str):
         message = _SAFE_FAILURE_MESSAGES.get(error.code)
         if message is not None:
-            return error.code, message
+            return error.code, message, None
         if error.code.startswith("TASK."):
-            return "TASK.EXECUTION_ERROR", _SAFE_FAILURE_MESSAGES["TASK.EXECUTION_ERROR"]
+            return (
+                "TASK.EXECUTION_ERROR",
+                _SAFE_FAILURE_MESSAGES["TASK.EXECUTION_ERROR"],
+                None,
+            )
         if error.code.startswith("RESULT."):
-            return "RESULT.INVALID_OUTPUT", _SAFE_FAILURE_MESSAGES["RESULT.INVALID_OUTPUT"]
-    return "INFERENCE.EXECUTION_ERROR", _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"]
+            return (
+                "RESULT.INVALID_OUTPUT",
+                _SAFE_FAILURE_MESSAGES["RESULT.INVALID_OUTPUT"],
+                None,
+            )
+    return (
+        "INFERENCE.EXECUTION_ERROR",
+        _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"],
+        None,
+    )
 
+
+def _validated_quality_rejection(
+    error: QualityRejectedError,
+) -> QualityRejection | None:
+    """重建并校验异常数据，避免伪造错误码或损坏对象成为质量结论。"""
+    if error.code != "INFERENCE.QUALITY_REJECTED":
+        return None
+    try:
+        rejection = error.rejection
+        return QualityRejection(rejection.reason, rejection.details)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def claim_task_for_execution(*, task_id: int) -> UUID | None:

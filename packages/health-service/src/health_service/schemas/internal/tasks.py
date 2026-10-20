@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from health_inference import QualityRejection
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -28,6 +29,10 @@ class TaskRecordData(BaseModel):
     )
     failure_code: str | None = Field(default=None, description="安全失败代码")
     failure_message: str | None = Field(default=None, description="安全失败摘要")
+    failure_detail: object | None = Field(
+        default=None,
+        description="仅任务详情加载的私有失败 JSON",
+    )
 
 
 class TaskSummaryData(BaseModel):
@@ -50,7 +55,7 @@ class TaskSummaryData(BaseModel):
 
 
 class TaskDetailData(TaskSummaryData):
-    """保存本人任务摘要及允许公开的完整结果或失败摘要。"""
+    """保存本人任务的权威结果、安全摘要或类型化质量拒绝。"""
 
     result_payload: dict[str, object] | None = Field(
         default=None,
@@ -58,6 +63,10 @@ class TaskDetailData(TaskSummaryData):
     )
     failure_code: str | None = Field(default=None, description="安全失败代码")
     failure_message: str | None = Field(default=None, description="安全失败摘要")
+    quality_failure: QualityRejection | None = Field(
+        default=None,
+        description="仅符合质量拒绝契约时允许公开的类型化信息",
+    )
 
 
 class TaskInputFileData(BaseModel):

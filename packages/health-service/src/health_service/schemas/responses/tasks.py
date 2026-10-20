@@ -1,5 +1,12 @@
 """定义普通渠道可见的任务分页摘要与详情字段。"""
 
+from typing import Annotated, Literal
+
+from health_inference import (
+    LowScoreDetails,
+    QualityRejection,
+    QualityRejectionReason,
+)
 from ninja import Schema
 from pydantic import ConfigDict, Field
 
@@ -9,6 +16,35 @@ from health_service.schemas.internal.tasks import (
     TaskSummaryData,
 )
 from health_service.schemas.responses.types import BeijingDateTime
+
+
+class LowScoreQualityFailureDetailsResponse(Schema):
+    """公开低分拒绝实际比较的分数与阈值。"""
+
+    score: int | float = Field(description="本次计算实际得到的质量分数")
+    threshold: int | float = Field(description="本次计算实际使用的拒绝阈值")
+
+
+class LowScoreQualityFailureResponse(Schema):
+    """公开带实际数值明细的低分拒绝变体。"""
+
+    reason: Literal["LOW_SCORE"] = Field(description="稳定质量拒绝原因")
+    details: LowScoreQualityFailureDetailsResponse = Field(
+        description="本次低分比较的原始数值",
+    )
+
+
+class NoValidSignalQualityFailureResponse(Schema):
+    """公开无可用信号且不包含数值明细的拒绝变体。"""
+
+    reason: Literal["NO_VALID_SIGNAL"] = Field(description="稳定质量拒绝原因")
+    details: None = Field(description="无可用评分时固定为 null")
+
+
+QualityFailureResponse = Annotated[
+    LowScoreQualityFailureResponse | NoValidSignalQualityFailureResponse,
+    Field(discriminator="reason"),
+]
 
 
 class TaskSummaryResponse(Schema):
@@ -54,6 +90,11 @@ class TaskDetailResponse(TaskSummaryResponse):
         default=None,
         alias="failureMessage",
         description="安全失败摘要",
+    )
+    quality_failure: QualityFailureResponse | None = Field(
+        default=None,
+        alias="qualityFailure",
+        description="仅质量拒绝时提供的原因判别字段与白名单明细",
     )
 
 
@@ -121,7 +162,32 @@ def to_task_detail_response(task: TaskDetailData) -> TaskDetailResponse:
         result_payload=task.result_payload,
         failure_code=task.failure_code,
         failure_message=task.failure_message,
+        quality_failure=_to_quality_failure_response(task.quality_failure),
     )
+
+
+def _to_quality_failure_response(
+    rejection: QualityRejection | None,
+) -> QualityFailureResponse | None:
+    """按受控原因将内部拒绝明细转换为公开白名单变体。"""
+    if rejection is None:
+        return None
+    if rejection.reason is QualityRejectionReason.LOW_SCORE and isinstance(
+        rejection.details, LowScoreDetails
+    ):
+        return LowScoreQualityFailureResponse(
+            reason=QualityRejectionReason.LOW_SCORE.value,
+            details=LowScoreQualityFailureDetailsResponse(
+                score=rejection.details.score,
+                threshold=rejection.details.threshold,
+            ),
+        )
+    if rejection.reason is QualityRejectionReason.NO_VALID_SIGNAL and rejection.details is None:
+        return NoValidSignalQualityFailureResponse(
+            reason=QualityRejectionReason.NO_VALID_SIGNAL.value,
+            details=None,
+        )
+    return None
 
 
 def to_task_input_file_response(file: TaskInputFileData) -> TaskInputFileResponse:

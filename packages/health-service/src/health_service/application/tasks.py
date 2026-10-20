@@ -8,6 +8,7 @@ from typing import BinaryIO
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from health_inference.quality import quality_rejection_from_mapping
 from health_inference.registry import get_algorithm
 
 from health_service.application.dispatch import dispatch_task
@@ -233,6 +234,15 @@ def read_user_task(
     if record is None:
         raise TaskNotFound
     summary = _task_summary(record)
+    quality_failure = None
+    if (
+        record.status == "FAILED"
+        and record.failure_code == "INFERENCE.QUALITY_REJECTED"
+        and isinstance(record.failure_detail, Mapping)
+    ):
+        quality_failure = quality_rejection_from_mapping(
+            record.failure_detail.get("quality")
+        )
     return TaskDetailData(
         **summary.model_dump(),
         result_payload=(
@@ -246,6 +256,7 @@ def read_user_task(
             if record.status == "FAILED"
             else None
         ),
+        quality_failure=quality_failure,
     )
 
 
