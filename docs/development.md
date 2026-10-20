@@ -136,6 +136,8 @@ LOG_DIR=logs/inference uv run --locked --package health-service python manage.py
 
 每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
 
+算法只在明确质量拒绝时以 `INFERENCE.QUALITY_REJECTED` 进入 `FAILED` 终态；消费者在失败信息提交后才确认消息。`LOW_SCORE` 私有明细保存本次实际分数和阈值，`NO_VALID_SIGNAL` 不保存评分。已拒绝任务不会由补发扫描或消息重放重新执行；重新采集应创建携带新输入的新任务。既有恢复仍仅覆盖可派发的 `SUBMITTED` 和租约已过期的 `RUNNING`，不改变失败终态。事件日志只记录实际错误码，不记录质量原因、评分、阈值或异常正文。这条反馈通道不代表已新增质检规则，也不验证医学准确性。
+
 消费者遇到数据库或 Redis 故障会停止并报告固定错误，不把基础设施故障记成算法失败。修复依赖后可重新启动；数据库补发扫描会再次驱动仍可执行任务。Redis Stream 不会自动裁剪，可能持续增长；不要手工清空或裁剪仍有待恢复消息的 Stream，部署时应监控 Redis 容量并制定与消息恢复语义兼容的保留策略。
 
 **升级顺序：**先暂停新任务提交并备份数据库及两个文件根目录；停止旧消费者，检查遗留 `RUNNING` 任务；在维护窗口运行迁移；以共享配置启动新 Web 与消费者并确认可用后再开放提交。新旧消费者不得并行运行。**回滚顺序：**先暂停新提交，向消费者发送 SIGTERM 并等待当前安全执行结束，再停止 Web；保留数据库迁移字段、Redis Stream 和文件，不执行破坏性反向迁移或清理。旧版本不具备租约及 Stream 协议时不要启动旧消费者；未完成任务应留待兼容版本恢复。
@@ -257,6 +259,40 @@ unset MANAGER_PASSWORD
 
 `hr_br.example` 是只读取 PPG CSV 并返回样本数、时长和采样率诊断的非临床示例；不接受固定参数，也不需要模型权重制品。正式 `hr_br` 目前只有输入／结果接口模板，没有注册的执行器，不能发布。
 
+### 算法报告质量拒绝
+
+算法只在依据自身固定版本的规则明确确认质量要求不满足时报告拒绝；本契约只传递算法结论，不新增实际质检规则、通用阈值或默认评分。`LOW_SCORE` 必须携带本次实际比较的有限 `score` 和 `threshold`，且 `score < threshold`；不接受布尔值、字符串、NaN 或无穷值，也不先四舍五入。`NO_VALID_SIGNAL` 仅用于算法明确确认没有可用信号的情况，明细为 `None`，不要求或补造评分。未执行质量检查不代表质量通过。
+
+算法通过 `QualityRejectedError` 终止本次计算。以下函数只演示如何表达已由算法自身规则得出的两类拒绝，不定义如何计算分数或判断信号：
+
+```python
+from health_inference import (
+    LowScoreDetails,
+    QualityRejectedError,
+    QualityRejection,
+    QualityRejectionReason,
+)
+
+
+def reject_low_score(score: int | float, threshold: int | float) -> None:
+    """报告算法已经判定的低分结果。"""
+    raise QualityRejectedError(
+        QualityRejection(
+            QualityRejectionReason.LOW_SCORE,
+            LowScoreDetails(score=score, threshold=threshold),
+        )
+    )
+
+
+def reject_no_valid_signal() -> None:
+    """报告算法已经确认没有可用信号。"""
+    raise QualityRejectedError(
+        QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None)
+    )
+```
+
+文件格式或输入契约错误仍应报告 `INFERENCE.INVALID_INPUT`；意外异常不得按异常类型或文案推断质量原因。当前 `hr_br.example` 只做输入诊断，不新增质量检查，也不会自动产生上述拒绝。
+
 以下示例使用已经登录取得的 `MANAGER_ACCESS`。创建模型后从响应的 `data.modelId` 取出 `MODEL_ID`：
 
 ```sh
@@ -375,7 +411,29 @@ curl --include "$API/$CHANNEL/tasks/$TASK_ID" \
   --header "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-详情对 `SUCCEEDED` 返回数据库保存的完整权威 `result`，不会重新运行算法或从指标行重组结果；对 `FAILED` 只返回安全 `failureCode`、`failureMessage` 和完成时间，不返回 `failure_detail`、资料快照、原始输入或本地绝对路径。查询、上传、提交及下载都同时按账号及任务来源渠道授权；跨账号或跨来源渠道的任务返回 404。重复提交及不允许的状态变更返回冲突，任务不能由用户重置或改写固定版本。
+详情对 `SUCCEEDED` 返回数据库保存的完整权威 `result`，不会重新运行算法或从指标行重组结果；对 `FAILED` 只返回安全 `failureCode`、`failureMessage` 和完成时间，不返回 `failure_detail`、资料快照、原始输入或本地绝对路径。只有状态为 `FAILED`、错误码为 `INFERENCE.QUALITY_REJECTED` 且历史明细通过校验时，`qualityFailure` 才包含类型化白名单信息：
+
+```json
+{
+  "qualityFailure": {
+    "reason": "LOW_SCORE",
+    "details": {"score": 61.25, "threshold": 70}
+  }
+}
+```
+
+无可用信号不提供评分或阈值：
+
+```json
+{
+  "qualityFailure": {
+    "reason": "NO_VALID_SIGNAL",
+    "details": null
+  }
+}
+```
+
+成功任务、普通失败、缺少明细或损坏的历史明细中，`qualityFailure` 为 `null`。客户端应按稳定的 `reason` 值分支，不解析本地化的 `failureMessage`。查询、上传、提交及下载都同时按账号及任务来源渠道授权；跨账号或跨来源渠道的任务返回 404。重复提交及不允许的状态变更返回冲突，任务不能由用户重置或改写固定版本。
 
 ### 下载当前或历史输入及成功输出
 
