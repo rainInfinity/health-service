@@ -43,6 +43,11 @@ class Task(AuditModel):
         db_comment="提交时冻结的健康资料快照",
     )
     submitted_at = models.DateTimeField(null=True, blank=True, db_comment="提交时间")
+    client_metadata = models.JSONField(
+        null=True,
+        blank=True,
+        db_comment="任务提交时记录的可选客户端元数据",
+    )
     started_at = models.DateTimeField(null=True, blank=True, db_comment="开始执行时间")
     finished_at = models.DateTimeField(null=True, blank=True, db_comment="结束时间")
     result_payload = models.JSONField(
@@ -242,14 +247,8 @@ class TaskMetric(AuditModel):
             ),
             models.CheckConstraint(
                 condition=(
-                    (
-                        models.Q(numeric_value__isnull=False)
-                        & models.Q(boolean_value__isnull=True)
-                    )
-                    | (
-                        models.Q(numeric_value__isnull=True)
-                        & models.Q(boolean_value__isnull=False)
-                    )
+                    (models.Q(numeric_value__isnull=False) & models.Q(boolean_value__isnull=True))
+                    | (models.Q(numeric_value__isnull=True) & models.Q(boolean_value__isnull=False))
                 ),
                 name="health_task_metric_one_value",
             ),

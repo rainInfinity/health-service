@@ -6,11 +6,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class TaskExecutionContextData:
-    """保存当前有效租约任务的固定版本、资料快照和选中输入键。"""
+    """保存有效租约任务的固定版本、资料快照、可选元数据和输入键。"""
 
     task_id: int  # 任务主键。
     model_version_id: int  # 提交时固定的模型版本主键。
     profile_snapshot: Mapping[str, object] | None  # 提交时冻结的资料快照。
+    client_metadata: Mapping[str, object] | None  # 可选客户端元数据；未提供时为空。
     input_storage_keys: Mapping[str, str]  # 已选输入逻辑名到任务存储相对键。
 
 

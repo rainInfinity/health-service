@@ -42,9 +42,7 @@ from health_service.schemas.internal.tasks import (
 )
 
 
-def create_task_draft(
-    *, user_id: int, channel: str, model_id: int
-) -> TaskSummaryData:
+def create_task_draft(*, user_id: int, channel: str, model_id: int) -> TaskSummaryData:
     """固定请求渠道已发布的当前版本并创建未提交草稿。"""
     if channel not in ORDINARY_CHANNELS:
         raise TaskNotFound
@@ -120,7 +118,11 @@ def _task_storage() -> LocalFileStorage:
 
 
 def submit_user_task(
-    *, task_id: int, user_id: int, channel: str
+    *,
+    task_id: int,
+    user_id: int,
+    channel: str,
+    client_metadata: dict[str, object] | None = None,
 ) -> TaskSummaryData:
     """校验当前版本与选中文件后冻结资料并提交本人草稿。"""
     if channel not in ORDINARY_CHANNELS:
@@ -182,6 +184,7 @@ def submit_user_task(
                 task_id=task_id,
                 profile_snapshot=profile_snapshot,
                 submitted_at=submitted_at,
+                client_metadata=client_metadata,
                 user_id=user_id,
             )
         except TaskRecordConflictError as error:
@@ -190,7 +193,11 @@ def submit_user_task(
 
 
 def submit_and_dispatch_user_task(
-    *, task_id: int, user_id: int, channel: str
+    *,
+    task_id: int,
+    user_id: int,
+    channel: str,
+    client_metadata: dict[str, object] | None = None,
 ) -> TaskSummaryData:
     """提交草稿并仅在数据库事务提交后立即尝试派发消息。"""
     with transaction.atomic():
@@ -198,6 +205,7 @@ def submit_and_dispatch_user_task(
             task_id=task_id,
             user_id=user_id,
             channel=channel,
+            client_metadata=client_metadata,
         )
         transaction.on_commit(lambda: dispatch_task(task.task_id))
     return task
@@ -220,9 +228,7 @@ def list_user_tasks(
     return total, summaries
 
 
-def read_user_task(
-    *, task_id: int, user_id: int, channel: str
-) -> TaskDetailData:
+def read_user_task(*, task_id: int, user_id: int, channel: str) -> TaskDetailData:
     """只按账号与来源渠道读取任务详情及允许公开的结果字段。"""
     if channel not in ORDINARY_CHANNELS:
         raise TaskNotFound
@@ -240,22 +246,12 @@ def read_user_task(
         and record.failure_code == "INFERENCE.QUALITY_REJECTED"
         and isinstance(record.failure_detail, Mapping)
     ):
-        quality_failure = quality_rejection_from_mapping(
-            record.failure_detail.get("quality")
-        )
+        quality_failure = quality_rejection_from_mapping(record.failure_detail.get("quality"))
     return TaskDetailData(
         **summary.model_dump(),
-        result_payload=(
-            record.result_payload
-            if record.status == "SUCCEEDED"
-            else None
-        ),
+        result_payload=(record.result_payload if record.status == "SUCCEEDED" else None),
         failure_code=record.failure_code if record.status == "FAILED" else None,
-        failure_message=(
-            record.failure_message
-            if record.status == "FAILED"
-            else None
-        ),
+        failure_message=(record.failure_message if record.status == "FAILED" else None),
         quality_failure=quality_failure,
     )
 
@@ -296,11 +292,7 @@ def open_user_task_output_file(
         user_id=user_id,
         channel_label=channel,
     )
-    if (
-        record is None
-        or record.status != "SUCCEEDED"
-        or record.result_payload is None
-    ):
+    if record is None or record.status != "SUCCEEDED" or record.result_payload is None:
         raise TaskNotFound
     output_files = record.result_payload.get("output_files")
     if not isinstance(output_files, Mapping):

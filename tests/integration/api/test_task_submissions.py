@@ -19,6 +19,7 @@ from health_service.application.catalog import (
     select_channel_model_version,
 )
 from health_service.application.tasks import create_task_draft
+from health_service.infrastructure.persistence import tasks as task_persistence
 from health_service.models import Task, TaskMetric
 
 
@@ -34,6 +35,36 @@ async def _login(client: AsyncClient, username: str, password: str):
 async def _close_worker_database_connection() -> None:
     """关闭异步请求同步线程持有的数据库连接。"""
     await sync_to_async(connections.close_all, thread_sensitive=True)()
+
+
+async def _create_uploaded_task(
+    client: AsyncClient,
+    headers: dict[str, str],
+    model_id: int,
+) -> int:
+    """创建任务草稿并上传有效 PPG 输入。"""
+    created = await client.post(
+        "/api/v1/ios-cn/tasks",
+        data=json.dumps({"modelId": model_id}),
+        content_type="application/json",
+        headers=headers,
+    )
+    task_id = created.json()["data"]["taskId"]
+    uploaded = await client.post(
+        f"/api/v1/ios-cn/tasks/{task_id}/files",
+        data={
+            "logicalName": "ppg",
+            "file": SimpleUploadedFile(
+                "ppg.csv",
+                b"timestampFrame,avgR\n1,2\n",
+                content_type="text/csv",
+            ),
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    assert uploaded.status_code == 201
+    return task_id
 
 
 @pytest.mark.django_db(transaction=True)
@@ -70,6 +101,8 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
         task_id = created.json()["data"]["taskId"]
         missing_input = await client.post(
             f"/api/v1/ios-cn/tasks/{task_id}/submit",
+            data=b"",
+            content_type="application/octet-stream",
             headers=headers,
         )
         uploaded = await client.post(
@@ -84,12 +117,22 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
             },
             headers=headers,
         )
+        invalid_metadata = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/submit",
+            data=json.dumps({"clientMetadata": []}),
+            content_type="application/json",
+            headers=headers,
+        )
         submitted = await client.post(
             f"/api/v1/ios-cn/tasks/{task_id}/submit",
+            data=b"",
+            content_type="application/octet-stream",
             headers=headers,
         )
         repeated = await client.post(
             f"/api/v1/ios-cn/tasks/{task_id}/submit",
+            data=b"",
+            content_type="application/octet-stream",
             headers=headers,
         )
         detail = await client.get(
@@ -97,7 +140,16 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
             headers=headers,
         )
         await _close_worker_database_connection()
-        return created, missing_input, uploaded, submitted, repeated, detail, task_id
+        return (
+            created,
+            missing_input,
+            uploaded,
+            invalid_metadata,
+            submitted,
+            repeated,
+            detail,
+            task_id,
+        )
 
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
@@ -110,6 +162,7 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
             created,
             missing_input,
             uploaded,
+            invalid_metadata,
             submitted,
             repeated,
             detail,
@@ -118,8 +171,9 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
 
     assert created.status_code == 201
     assert missing_input.status_code == 422
+    assert invalid_metadata.status_code == 422
     assert uploaded.status_code == 201
-    assert submitted.status_code == 200
+    assert submitted.status_code == 200, submitted.content
     assert submitted.json()["data"]["status"] == Task.StatusChoices.SUBMITTED
     assert submitted.json()["data"]["submittedAt"] is not None
     assert repeated.status_code == 409
@@ -131,6 +185,210 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
     assert record.profile_snapshot["history_json"] is None
     assert record.status == Task.StatusChoices.SUBMITTED
     assert record.last_dispatched_at is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_submit_accepts_optional_client_metadata_without_exposing_it(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """验证元数据可选持久化、不可改写，且不进入公开响应或日志。"""
+    username = "task-client-metadata-owner"
+    password = "Prairie-cloud-227!strong"
+    get_user_model().objects.create_user(username=username, password=password)
+    model = create_model(
+        code="task-client-metadata",
+        name="Task metadata",
+        description=None,
+    )
+    draft = create_model_version(
+        model_id=model.model_id,
+        version="1.0",
+        algorithm_key="hr_br.example",
+        params=None,
+    )
+    version = publish_model_version(version_id=draft.version_id)
+    select_channel_model_version(
+        channel="ios-cn",
+        model_id=model.model_id,
+        version_id=version.version_id,
+    )
+    metadata = {
+        "deviceModel": "CLIENT-METADATA-SECRET-7E30",
+        "brand": "Example",
+        "custom": {"appBuild": 42},
+    }
+
+    async def exercise_api():
+        """通过真实认证和任务接口覆盖元数据的三种可选输入。"""
+        client = AsyncClient()
+        login = await _login(client, username, password)
+        headers = {"Authorization": f"Bearer {login.json()['data']['accessToken']}"}
+
+        object_task_id = await _create_uploaded_task(
+            client,
+            headers,
+            model.model_id,
+        )
+        object_submit = await client.post(
+            f"/api/v1/ios-cn/tasks/{object_task_id}/submit",
+            data=json.dumps({"clientMetadata": metadata}),
+            content_type="application/json",
+            headers=headers,
+        )
+        repeated_submit = await client.post(
+            f"/api/v1/ios-cn/tasks/{object_task_id}/submit",
+            data=json.dumps({"clientMetadata": {"deviceModel": "changed"}}),
+            content_type="application/json",
+            headers=headers,
+        )
+        object_detail = await client.get(
+            f"/api/v1/ios-cn/tasks/{object_task_id}",
+            headers=headers,
+        )
+
+        omitted_task_id = await _create_uploaded_task(
+            client,
+            headers,
+            model.model_id,
+        )
+        omitted_submit = await client.post(
+            f"/api/v1/ios-cn/tasks/{omitted_task_id}/submit",
+            data="{}",
+            content_type="application/json",
+            headers=headers,
+        )
+
+        null_task_id = await _create_uploaded_task(
+            client,
+            headers,
+            model.model_id,
+        )
+        null_submit = await client.post(
+            f"/api/v1/ios-cn/tasks/{null_task_id}/submit",
+            data=json.dumps({"clientMetadata": None}),
+            content_type="application/json",
+            headers=headers,
+        )
+
+        invalid_task_id = await _create_uploaded_task(
+            client,
+            headers,
+            model.model_id,
+        )
+        invalid_submit = await client.post(
+            f"/api/v1/ios-cn/tasks/{invalid_task_id}/submit",
+            data=json.dumps({"clientMetadata": []}),
+            content_type="application/json",
+            headers=headers,
+        )
+        invalid_detail = await client.get(
+            f"/api/v1/ios-cn/tasks/{invalid_task_id}",
+            headers=headers,
+        )
+        await _close_worker_database_connection()
+        rollback_task_id = await _create_uploaded_task(
+            client,
+            headers,
+            model.model_id,
+        )
+        mark_task_submitted = task_persistence.mark_task_submitted
+
+        def fail_after_persisting_submission(**kwargs):
+            """在 SQL 更新后模拟事务内故障。"""
+            mark_task_submitted(**kwargs)
+            raise RuntimeError("injected submission failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                task_persistence,
+                "mark_task_submitted",
+                fail_after_persisting_submission,
+            )
+            rollback_submit = await client.post(
+                f"/api/v1/ios-cn/tasks/{rollback_task_id}/submit",
+                data=json.dumps({"clientMetadata": metadata}),
+                content_type="application/json",
+                headers=headers,
+            )
+        rollback_detail = await client.get(
+            f"/api/v1/ios-cn/tasks/{rollback_task_id}",
+            headers=headers,
+        )
+        return (
+            object_task_id,
+            object_submit,
+            repeated_submit,
+            object_detail,
+            omitted_task_id,
+            omitted_submit,
+            null_task_id,
+            null_submit,
+            invalid_task_id,
+            invalid_submit,
+            invalid_detail,
+            rollback_task_id,
+            rollback_submit,
+            rollback_detail,
+        )
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        MAX_UPLOAD_BYTES=1024,
+        REDIS_URL="redis://127.0.0.1:1/0",
+        INFERENCE_STREAM=f"test:inference:{uuid4().hex}",
+    ):
+        (
+            object_task_id,
+            object_submit,
+            repeated_submit,
+            object_detail,
+            omitted_task_id,
+            omitted_submit,
+            null_task_id,
+            null_submit,
+            invalid_task_id,
+            invalid_submit,
+            invalid_detail,
+            rollback_task_id,
+            rollback_submit,
+            rollback_detail,
+        ) = asyncio.run(exercise_api())
+
+    assert object_submit.status_code == 200
+    assert repeated_submit.status_code == 409
+    assert object_detail.status_code == 200
+    assert omitted_submit.status_code == 200
+    assert null_submit.status_code == 200
+    assert invalid_submit.status_code == 422
+    assert invalid_detail.status_code == 200
+    assert invalid_detail.json()["data"]["status"] == Task.StatusChoices.DRAFT
+    assert rollback_submit.status_code == 500
+    assert rollback_detail.status_code == 200
+    assert rollback_detail.json()["data"]["status"] == Task.StatusChoices.DRAFT
+
+    object_record = Task.objects.get(pk=object_task_id)
+    assert object_record.client_metadata == metadata
+    assert "clientMetadata" not in object_record.profile_snapshot
+    assert object_record.status == Task.StatusChoices.SUBMITTED
+    assert Task.objects.get(pk=omitted_task_id).client_metadata is None
+    assert Task.objects.get(pk=null_task_id).client_metadata is None
+    invalid_record = Task.objects.get(pk=invalid_task_id)
+    assert invalid_record.client_metadata is None
+    assert invalid_record.profile_snapshot is None
+    assert invalid_record.status == Task.StatusChoices.DRAFT
+    rollback_record = Task.objects.get(pk=rollback_task_id)
+    assert rollback_record.status == Task.StatusChoices.DRAFT
+    assert rollback_record.profile_snapshot is None
+    assert rollback_record.submitted_at is None
+    assert rollback_record.client_metadata is None
+
+    for response in (object_submit, object_detail):
+        assert "clientMetadata" not in response.json()["data"]
+        assert metadata["deviceModel"] not in response.content.decode()
+    assert metadata["deviceModel"] not in capsys.readouterr().out
 
 
 @pytest.mark.django_db(transaction=True)

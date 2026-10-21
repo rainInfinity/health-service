@@ -53,9 +53,7 @@ def _version_runtime(version_id: int) -> _VersionRuntime:
         raise InferenceError("INFERENCE.INVALID_PARAMETERS", "模型参数无效") from error
 
     artifacts = catalog_persistence.list_model_artifacts(version_id=version_id)
-    artifact_storage_keys = {
-        artifact.logical_name: artifact.storage_key for artifact in artifacts
-    }
+    artifact_storage_keys = {artifact.logical_name: artifact.storage_key for artifact in artifacts}
     if set(artifact_storage_keys) != set(algorithm.required_artifacts):
         raise InferenceError("INFERENCE.INVALID_ARTIFACT", "模型制品配置无效")
     return _VersionRuntime(
@@ -70,9 +68,7 @@ def clear_version_runtime_cache() -> None:
     _version_runtime.cache_clear()
 
 
-def run_task_inference(
-    *, task_id: int, execution_token: UUID
-) -> PreparedInferenceResult | None:
+def run_task_inference(*, task_id: int, execution_token: UUID) -> PreparedInferenceResult | None:
     """从有效租约任务准备快照和文件并运行其固定版本算法。"""
     context = task_persistence.get_active_task_execution_context(
         task_id=task_id,
@@ -89,15 +85,15 @@ def run_task_inference(
         profile = deepcopy(dict(profile_snapshot))
     else:
         raise InferenceError("INFERENCE.INVALID_PROFILE", "提交资料快照无效")
-    if any(
-        profile.get(field) is None
-        for field in runtime.algorithm.required_profile_fields
-    ):
+    client_metadata = context.client_metadata
+    if client_metadata is not None:
+        if not isinstance(client_metadata, Mapping):
+            raise InferenceError("INFERENCE.INVALID_INPUT", "客户端元数据无效")
+        client_metadata = deepcopy(dict(client_metadata))
+    if any(profile.get(field) is None for field in runtime.algorithm.required_profile_fields):
         raise InferenceError("INFERENCE.MISSING_PROFILE", "计算所需资料缺失")
 
-    missing_inputs = set(runtime.algorithm.required_inputs) - set(
-        context.input_storage_keys
-    )
+    missing_inputs = set(runtime.algorithm.required_inputs) - set(context.input_storage_keys)
     if missing_inputs:
         raise InferenceError("INFERENCE.INVALID_INPUT", "缺少算法所需输入文件")
     missing_artifacts = set(runtime.algorithm.required_artifacts) - set(
@@ -139,6 +135,7 @@ def run_task_inference(
         profile=profile,
         params=deepcopy(dict(runtime.params)),
         output_dir=output_dir,
+        client_metadata=client_metadata,
     )
     output = runtime.algorithm.run(inference_input)
     if "output_files" in output.payload:

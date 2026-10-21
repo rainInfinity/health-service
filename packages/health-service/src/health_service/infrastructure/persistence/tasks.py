@@ -68,9 +68,7 @@ _TASK_DETAIL_FIELDS = (
 )
 
 
-def create_task_draft(
-    *, user_id: int, channel_label: str, model_id: int
-) -> TaskRecordData:
+def create_task_draft(*, user_id: int, channel_label: str, model_id: int) -> TaskRecordData:
     """按渠道行、当前选择行顺序加锁并固定已发布版本。"""
     with transaction.atomic():
         channel = (
@@ -178,9 +176,7 @@ def get_user_task_submission_target(
     )
 
 
-def lock_channel_model_selection_for_submission(
-    *, channel_label: str, model_id: int
-) -> int | None:
+def lock_channel_model_selection_for_submission(*, channel_label: str, model_id: int) -> int | None:
     """依次锁定渠道和当前版本选择，返回所选发布版本 ID。"""
     channel = (
         Channel.objects.select_for_update(of=("self",))
@@ -220,9 +216,7 @@ def lock_user_task_for_submission(
     return _task_record_data(task, task.model_version)
 
 
-def list_selected_task_input_records(
-    *, task_id: int
-) -> tuple[TaskInputFileRecordData, ...]:
+def list_selected_task_input_records(*, task_id: int) -> tuple[TaskInputFileRecordData, ...]:
     """读取草稿当前选中输入的内部相对键与大小。"""
     return tuple(
         TaskInputFileRecordData(
@@ -251,6 +245,7 @@ def mark_task_submitted(
     task_id: int,
     profile_snapshot: dict[str, object],
     submitted_at: datetime,
+    client_metadata: dict[str, object] | None,
     user_id: int,
 ) -> TaskRecordData:
     """原子冻结草稿资料并转换为已提交状态。"""
@@ -261,6 +256,7 @@ def mark_task_submitted(
         status=Task.StatusChoices.SUBMITTED,
         profile_snapshot=profile_snapshot,
         submitted_at=submitted_at,
+        client_metadata=client_metadata,
         updated_at=submitted_at,
         updated_by=f"user:{user_id}",
     )
@@ -294,19 +290,14 @@ def mark_task_dispatched(*, task_id: int) -> bool:
     return updated == 1
 
 
-def list_dispatchable_task_ids(
-    *, limit: int, dispatch_interval_seconds: int
-) -> tuple[int, ...]:
+def list_dispatchable_task_ids(*, limit: int, dispatch_interval_seconds: int) -> tuple[int, ...]:
     """按稳定主键顺序有界读取待派发及租约过期任务。"""
     dispatch_cutoff = timezone.now() - timedelta(seconds=dispatch_interval_seconds)
     task_ids = (
         Task.objects.filter(
             (
                 Q(status=Task.StatusChoices.SUBMITTED)
-                & (
-                    Q(last_dispatched_at__isnull=True)
-                    | Q(last_dispatched_at__lte=dispatch_cutoff)
-                )
+                & (Q(last_dispatched_at__isnull=True) | Q(last_dispatched_at__lte=dispatch_cutoff))
             )
             | Q(
                 status=Task.StatusChoices.RUNNING,
@@ -319,9 +310,7 @@ def list_dispatchable_task_ids(
     return tuple(task_ids)
 
 
-def claim_task_for_execution(
-    *, task_id: int, lease_seconds: int, max_attempts: int
-) -> UUID | None:
+def claim_task_for_execution(*, task_id: int, lease_seconds: int, max_attempts: int) -> UUID | None:
     """仅领取待执行或按数据库时间已过期的任务并增加一次有效尝试。"""
     claimable = Q(status=Task.StatusChoices.SUBMITTED) | Q(
         status=Task.StatusChoices.RUNNING,
@@ -337,10 +326,7 @@ def claim_task_for_execution(
         )
         if task is None:
             return None
-        if (
-            task.status == Task.StatusChoices.RUNNING
-            and task.attempt_count >= max_attempts
-        ):
+        if task.status == Task.StatusChoices.RUNNING and task.attempt_count >= max_attempts:
             Task.objects.filter(
                 pk=task.pk,
                 status=Task.StatusChoices.RUNNING,
@@ -379,9 +365,7 @@ def claim_task_for_execution(
         return execution_token if updated == 1 else None
 
 
-def renew_task_execution_lease(
-    *, task_id: int, execution_token: UUID, lease_seconds: int
-) -> bool:
+def renew_task_execution_lease(*, task_id: int, execution_token: UUID, lease_seconds: int) -> bool:
     """仅以匹配且仍有效的执行令牌续约，不复活过期租约。"""
     updated = Task.objects.filter(
         pk=task_id,
@@ -407,7 +391,7 @@ def get_active_task_execution_context(
             execution_token=execution_token,
             lease_expires_at__gt=Now(),
         )
-        .values("id", "model_version_id", "profile_snapshot")
+        .values("id", "model_version_id", "profile_snapshot", "client_metadata")
         .first()
     )
     if task is None:
@@ -424,6 +408,7 @@ def get_active_task_execution_context(
         task_id=task["id"],
         model_version_id=task["model_version_id"],
         profile_snapshot=task["profile_snapshot"],
+        client_metadata=task["client_metadata"],
         input_storage_keys=input_storage_keys,
     )
 
@@ -475,12 +460,8 @@ def save_task_execution_success(
                 TaskMetric(
                     task_id=task_id,
                     metric_id=metric.metric_id,
-                    numeric_value=(
-                        metric.value if type(metric.value) is not bool else None
-                    ),
-                    boolean_value=(
-                        metric.value if type(metric.value) is bool else None
-                    ),
+                    numeric_value=(metric.value if type(metric.value) is not bool else None),
+                    boolean_value=(metric.value if type(metric.value) is bool else None),
                     created_at=recorded_at,
                     updated_at=recorded_at,
                     created_by="system:worker",

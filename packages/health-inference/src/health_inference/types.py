@@ -19,15 +19,17 @@ class MetricContract:
     value_type: MetricValueType  # 指标值类型：有限数值或布尔值。
     unit: str | None  # 数值单位；布尔值通常为空。
 
+
 @dataclass(frozen=True, slots=True)
 class InferenceInput:
-    """保存单个任务已准备好的文件、资料快照及固定参数。"""
+    """保存任务文件、资料快照、可选客户端元数据及固定参数。"""
 
     files: Mapping[str, Path]  # 按算法逻辑名索引的任务输入文件。
     artifacts: Mapping[str, Path]  # 按逻辑名索引的模型制品文件。
     profile: Mapping[str, object]  # 提交时冻结的健康资料，不得读取实时资料替代。
     params: Mapping[str, object]  # 已发布模型版本固定的参数。
     output_dir: Path  # 当前任务与执行令牌专属的输出目录。
+    client_metadata: Mapping[str, object] | None = None  # 可选客户端自定义信息；未提供时为空。
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +71,7 @@ class AlgorithmDefinition:
         if not set(self.required_artifacts).issubset(inference_input.artifacts):
             raise InferenceError("INFERENCE.INVALID_ARTIFACT", "缺少算法所需模型制品")
         if any(
-            inference_input.profile.get(field) is None
-            for field in self.required_profile_fields
+            inference_input.profile.get(field) is None for field in self.required_profile_fields
         ):
             raise InferenceError("INFERENCE.MISSING_PROFILE", "计算所需资料缺失")
 

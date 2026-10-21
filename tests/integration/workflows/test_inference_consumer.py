@@ -13,6 +13,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.db import OperationalError, connections
 from django.test import AsyncClient, override_settings
@@ -46,13 +47,7 @@ from redis import Redis
 
 from tests.log_records import parse_console_records
 
-_PPG_CSV = (
-    "timestampFrame,avgR,avgG,avgB\n"
-    "0,1,2,3\n"
-    "500,2,3,4\n"
-    "1000,3,4,5\n"
-    "1500,4,5,6\n"
-)
+_PPG_CSV = "timestampFrame,avgR,avgG,avgB\n0,1,2,3\n500,2,3,4\n1000,3,4,5\n1500,4,5,6\n"
 _EXAMPLE_METRICS = (
     ("example.ppg.sample_count", "samples"),
     ("example.ppg.duration_seconds", "seconds"),
@@ -74,9 +69,7 @@ def inference_stream():
         client.close()
 
 
-def _create_example_task(
-    *, last_dispatched_at: datetime | None = None
-) -> Task:
+def _create_example_task(*, last_dispatched_at: datetime | None = None) -> Task:
     """创建带示例 PPG 文件和完整投影配置的待执行任务。"""
     user = get_user_model().objects.create_user(
         username=f"consumer-{uuid4().hex}",
@@ -162,6 +155,7 @@ def _create_example_task_for_version(version_id: int) -> Task:
     )
     _store_ppg_input(task, uploaded_at=now)
     return task
+
 
 @pytest.fixture
 def isolated_quality_algorithm(monkeypatch):
@@ -263,14 +257,177 @@ def test_once_dispatches_and_executes_example_task(tmp_path, inference_stream, c
     assert client.xpending(stream, group)["pending"] == 0
     records = parse_console_records(capsys.readouterr().out)
     assert [record["event"] for record in records] == [
-        "inference.worker.starting", "inference.worker.ready",
-        "inference.message.received", "inference.task.started",
-        "inference.task.succeeded", "inference.worker.stopped",
+        "inference.worker.starting",
+        "inference.worker.ready",
+        "inference.message.received",
+        "inference.task.started",
+        "inference.task.succeeded",
+        "inference.worker.stopped",
     ]
     task_records = [record for record in records if "taskId" in record]
     assert all(record["taskId"] == str(task.pk) for record in task_records)
     assert len({record["messageId"] for record in task_records}) == 1
     assert float(records[-2]["durationMs"]) >= 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_registered_client_metadata_tasks_execute_end_to_end(
+    tmp_path,
+    inference_stream,
+    capsys,
+):
+    """从普通渠道注册到真实消费者完成旧式及元数据任务。"""
+    redis_client, stream, group = inference_stream
+    username = f"consumer-e2e-{uuid4().hex}"
+    password = "Dawn-valley-417!strong"
+    metadata = {
+        "deviceModel": "E2E-CLIENT-METADATA-SECRET",
+        "brand": "Example",
+        "custom": {"appBuild": 42},
+    }
+    expected_result = {
+        "example": True,
+        "sample_count": 4,
+        "duration_seconds": 1.5,
+        "sampling_rate_hz": 2.0,
+    }
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        model = create_model(
+            code=f"consumer-e2e-{uuid4().hex}",
+            name="Consumer end-to-end",
+            description=None,
+        )
+        draft = create_model_version(
+            model_id=model.model_id,
+            version="1.0",
+            algorithm_key="hr_br.example",
+            params=None,
+        )
+        for code, unit in _EXAMPLE_METRICS:
+            create_metric_definition(
+                code=code,
+                description=code,
+                value_type="number",
+                unit=unit,
+            )
+        set_model_version_metrics(
+            version_id=draft.version_id,
+            metric_codes=tuple(code for code, _ in _EXAMPLE_METRICS),
+        )
+        version = publish_model_version(version_id=draft.version_id)
+        select_channel_model_version(
+            channel="ios-cn",
+            model_id=model.model_id,
+            version_id=version.version_id,
+        )
+
+        async def register_and_submit():
+            """注册真实用户并通过三个请求形态提交推理任务。"""
+            client = AsyncClient()
+            registration = await client.post(
+                "/api/v1/ios-cn/auth/register",
+                data=json.dumps({"username": username, "password": password}),
+                content_type="application/json",
+            )
+            login = await client.post(
+                "/api/v1/ios-cn/auth/login",
+                data=json.dumps({"username": username, "password": password}),
+                content_type="application/json",
+            )
+            headers = {"Authorization": f"Bearer {login.json()['data']['accessToken']}"}
+            tasks = []
+            request_bodies = (None, {"clientMetadata": metadata}, {})
+            for request_body in request_bodies:
+                created = await client.post(
+                    "/api/v1/ios-cn/tasks",
+                    data=json.dumps({"modelId": model.model_id}),
+                    content_type="application/json",
+                    headers=headers,
+                )
+                task_id = created.json()["data"]["taskId"]
+                uploaded = await client.post(
+                    f"/api/v1/ios-cn/tasks/{task_id}/files",
+                    data={
+                        "logicalName": "ppg",
+                        "file": SimpleUploadedFile(
+                            "ppg.csv",
+                            _PPG_CSV.encode("utf-8"),
+                            content_type="text/csv",
+                        ),
+                    },
+                    headers=headers,
+                )
+                submit_url = f"/api/v1/ios-cn/tasks/{task_id}/submit"
+                if request_body is None:
+                    submitted = await client.post(
+                        submit_url,
+                        data=b"",
+                        content_type="application/octet-stream",
+                        headers=headers,
+                    )
+                else:
+                    submitted = await client.post(
+                        submit_url,
+                        data=json.dumps(request_body),
+                        content_type="application/json",
+                        headers=headers,
+                    )
+                tasks.append((task_id, created, uploaded, submitted))
+            await sync_to_async(connections.close_all, thread_sensitive=True)()
+            return registration, login, tasks, headers
+
+        registration, login, task_responses, headers = asyncio.run(register_and_submit())
+        assert registration.status_code == 201
+        assert login.status_code == 200
+        user = get_user_model().objects.get(pk=registration.json()["data"]["userId"])
+        assert user.registration_channel.label == "ios-cn"
+
+        task_ids = [task_id for task_id, *_ in task_responses]
+        for task_id, created, uploaded, submitted in task_responses:
+            assert created.status_code == 201
+            assert uploaded.status_code == 201
+            assert submitted.status_code == 200
+            assert "clientMetadata" not in submitted.json()["data"]
+            assert metadata["deviceModel"] not in submitted.content.decode()
+            assert Task.objects.get(pk=task_id).status == Task.StatusChoices.SUBMITTED
+
+        _run_once()
+
+        tasks = [Task.objects.get(pk=task_id) for task_id in task_ids]
+        assert all(task.status == Task.StatusChoices.SUCCEEDED for task in tasks)
+        assert all(task.result_payload == expected_result for task in tasks)
+        assert tasks[0].client_metadata is None
+        assert tasks[1].client_metadata == metadata
+        assert tasks[2].client_metadata is None
+        assert all(task.attempt_count == 1 for task in tasks)
+        assert redis_client.xpending(stream, group)["pending"] == 0
+
+        async def read_final_details():
+            """使用注册用户的 Access 核对任务完成响应未暴露元数据。"""
+            client = AsyncClient()
+            responses = [
+                await client.get(
+                    f"/api/v1/ios-cn/tasks/{task_id}",
+                    headers=headers,
+                )
+                for task_id in task_ids
+            ]
+            await sync_to_async(connections.close_all, thread_sensitive=True)()
+            return responses
+
+        details = asyncio.run(read_final_details())
+        for detail in details:
+            assert detail.status_code == 200
+            assert detail.json()["data"]["status"] == Task.StatusChoices.SUCCEEDED
+            assert "clientMetadata" not in detail.json()["data"]
+            assert metadata["deviceModel"] not in detail.content.decode()
+
+    assert metadata["deviceModel"] not in capsys.readouterr().out
+
 
 @pytest.mark.parametrize(
     ("rejection", "expected_detail"),
@@ -353,10 +510,7 @@ def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
     assert failed[0]["taskId"] == str(task.pk)
     assert "PRIVATE-QUALITY-SENTINEL" not in output
     assert rejection.reason.value not in output
-    assert all(
-        not {"quality", "score", "threshold"}.intersection(record)
-        for record in records
-    )
+    assert all(not {"quality", "score", "threshold"}.intersection(record) for record in records)
 
 
 @pytest.mark.parametrize(
@@ -408,11 +562,7 @@ def test_quality_rejection_runs_through_http_and_terminal_replay(
         try:
             detail = await client.get(
                 f"/api/v1/ios-cn/tasks/{task_id}",
-                headers={
-                    "Authorization": (
-                        f"Bearer {login.json()['data']['accessToken']}"
-                    )
-                },
+                headers={"Authorization": (f"Bearer {login.json()['data']['accessToken']}")},
             )
             return login, detail
         finally:
@@ -516,10 +666,7 @@ def test_quality_rejection_after_lease_loss_is_not_saved_or_acked(
     assert "inference.task.failed" not in events
     assert "PRIVATE-QUALITY-SENTINEL" not in output
     assert rejection.reason.value not in output
-    assert all(
-        not {"quality", "score", "threshold"}.intersection(record)
-        for record in records
-    )
+    assert all(not {"quality", "score", "threshold"}.intersection(record) for record in records)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -537,9 +684,7 @@ def test_quality_rejection_ack_failure_replays_only_terminal_ack(
     client, stream, group = inference_stream
     algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
     rejection = QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None)
-    expected_detail = {
-        "quality": {"reason": "NO_VALID_SIGNAL", "details": None}
-    }
+    expected_detail = {"quality": {"reason": "NO_VALID_SIGNAL", "details": None}}
     scheduled_rejections.append(rejection)
     task: Task
 
@@ -613,7 +758,9 @@ def test_once_exits_immediately_when_stream_has_no_messages(inference_stream, ca
 
     assert client.xrange(stream) == []
     assert [record["event"] for record in parse_console_records(capsys.readouterr().out)] == [
-        "inference.worker.starting", "inference.worker.ready", "inference.worker.stopped",
+        "inference.worker.starting",
+        "inference.worker.ready",
+        "inference.worker.stopped",
     ]
 
 
@@ -678,9 +825,7 @@ def test_once_leaves_message_pending_while_database_lease_is_active(
             status=Task.StatusChoices.RUNNING,
             started_at=timezone.now(),
             execution_token=execution_token,
-            lease_expires_at=(
-                timezone.now() + timedelta(seconds=settings.INFERENCE_LEASE_SECONDS)
-            ),
+            lease_expires_at=(timezone.now() + timedelta(seconds=settings.INFERENCE_LEASE_SECONDS)),
             attempt_count=1,
         )
         client.xadd(stream, {"task_id": str(task.pk)})
@@ -808,8 +953,13 @@ def test_heartbeat_failure_never_writes_terminal_state_or_ack(
     lost = [record for record in records if record["event"] == "inference.task.lease_lost"]
     assert len(lost) == 1
     assert lost[0]["taskId"] == str(task.pk)
-    assert lost[0]["reason"] == ("heartbeat_error" if heartbeat_failure == "database-error" else "lease_expired")
-    assert all(record["event"] not in {"inference.task.succeeded", "inference.task.failed"} for record in records)
+    assert lost[0]["reason"] == (
+        "heartbeat_error" if heartbeat_failure == "database-error" else "lease_expired"
+    )
+    assert all(
+        record["event"] not in {"inference.task.succeeded", "inference.task.failed"}
+        for record in records
+    )
     assert "不可持久化的数据库诊断" not in output
 
 
@@ -848,11 +998,17 @@ def test_shutdown_signal_finishes_current_task_and_stops_batch(
 def test_invalid_input_logs_only_committed_safe_failure(tmp_path, inference_stream, capsys):
     """真实输入解析失败只输出已保存错误码，不泄露原始输入。"""
     client, stream, group = inference_stream
-    with override_settings(TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"):
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"
+    ):
         task = _create_example_task()
         input_file = TaskInputFile.objects.get(task=task)
-        storage = LocalFileStorage(Path(settings.TASK_DATA_ROOT), Path(settings.MODEL_ARTIFACT_ROOT))
-        storage.resolve_file(StorageArea.TASK_DATA, input_file.storage_key).write_text("HEALTH-INPUT-SENTINEL")
+        storage = LocalFileStorage(
+            Path(settings.TASK_DATA_ROOT), Path(settings.MODEL_ARTIFACT_ROOT)
+        )
+        storage.resolve_file(StorageArea.TASK_DATA, input_file.storage_key).write_text(
+            "HEALTH-INPUT-SENTINEL"
+        )
         _run_once()
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
@@ -869,7 +1025,11 @@ def test_invalid_input_logs_only_committed_safe_failure(tmp_path, inference_stre
 @pytest.mark.parametrize("boundary", ["save-error", "save-rejected", "ack-error"])
 @pytest.mark.django_db(transaction=True)
 def test_result_logs_do_not_cross_persistence_and_ack_boundaries(
-    tmp_path, inference_stream, monkeypatch, capsys, boundary,
+    tmp_path,
+    inference_stream,
+    monkeypatch,
+    capsys,
+    boundary,
 ):
     """保存失败、失权和确认失败分别保持真实数据库状态与日志含义。"""
     from django.core.management.base import CommandError
@@ -882,14 +1042,18 @@ def test_result_logs_do_not_cross_persistence_and_ack_boundaries(
         """在真实终态事务前模拟数据库故障或使数据库租约过期。"""
         if boundary == "save-error":
             raise OperationalError("PRIVATE-DATABASE-SENTINEL")
-        Task.objects.filter(pk=task_id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+        Task.objects.filter(pk=task_id).update(
+            lease_expires_at=timezone.now() - timedelta(seconds=1)
+        )
         return actual_save(task_id=task_id, execution_token=execution_token, result=result)
 
     def interrupted_ack(*args, **kwargs):
         """模拟终态提交后的 Redis 确认故障。"""
         raise RedisConnectionError("PRIVATE-REDIS-SENTINEL")
 
-    with override_settings(TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"):
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"
+    ):
         task = _create_example_task()
         if boundary == "ack-error":
             monkeypatch.setattr(Redis, "xack", interrupted_ack)

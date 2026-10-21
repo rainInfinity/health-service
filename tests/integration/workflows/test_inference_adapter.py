@@ -65,6 +65,19 @@ def _artifact_size_runner(inference_input: InferenceInput) -> InferenceOutput:
     )
 
 
+def _optional_device_model_runner(inference_input: InferenceInput) -> InferenceOutput:
+    """仅在算法契约声明时读取可选设备型号键。"""
+    metadata = inference_input.client_metadata
+    return InferenceOutput(
+        payload={
+            "has_metadata": metadata is not None,
+            "device_model": metadata.get("deviceModel") if metadata is not None else None,
+        },
+        metrics={},
+        output_files={},
+    )
+
+
 def _register_test_algorithm(
     *,
     required_artifacts: tuple[str, ...] = (),
@@ -112,7 +125,11 @@ def _create_published_version(*, algorithm_key: str) -> tuple[int, int]:
 
 
 def _create_running_task(
-    *, user, version_id: int, profile_snapshot: dict[str, object]
+    *,
+    user,
+    version_id: int,
+    profile_snapshot: dict[str, object],
+    client_metadata: Mapping[str, object] | None = None,
 ) -> tuple[Task, object]:
     """创建已取得有效执行权且固定版本的任务。"""
     now = timezone.now()
@@ -128,6 +145,7 @@ def _create_running_task(
         execution_token=token,
         lease_expires_at=now + timedelta(minutes=5),
         attempt_count=1,
+        client_metadata=client_metadata,
     )
     return task, token
 
@@ -235,16 +253,10 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
             assert first_result.output_files == {}
             assert second_result.output_files == {}
             assert (
-                storage.task_data_root
-                / "outputs"
-                / str(first_task.pk)
-                / first_token.hex
+                storage.task_data_root / "outputs" / str(first_task.pk) / first_token.hex
             ).is_dir()
             assert (
-                storage.task_data_root
-                / "outputs"
-                / str(second_task.pk)
-                / second_token.hex
+                storage.task_data_root / "outputs" / str(second_task.pk) / second_token.hex
             ).is_dir()
     finally:
         clear_version_runtime_cache()
@@ -270,10 +282,13 @@ def test_missing_snapshot_field_does_not_fall_back_to_current_profile(tmp_path):
     )
     clear_version_runtime_cache()
     try:
-        with override_settings(
-            TASK_DATA_ROOT=tmp_path / "tasks",
-            MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
-        ), pytest.raises(InferenceError) as error:
+        with (
+            override_settings(
+                TASK_DATA_ROOT=tmp_path / "tasks",
+                MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+            ),
+            pytest.raises(InferenceError) as error,
+        ):
             run_task_inference(task_id=task.pk, execution_token=token)
     finally:
         clear_version_runtime_cache()
@@ -344,3 +359,48 @@ def test_releasing_version_cache_does_not_delete_model_artifact(tmp_path):
             assert artifact_path.read_bytes() == b"immutable model artifact"
     finally:
         clear_version_runtime_cache()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_algorithm_can_consume_optional_client_metadata_keys(tmp_path):
+    """算法可读取设备型号，也可处理键或整份元数据缺失。"""
+    clear_version_runtime_cache()
+    try:
+        with override_settings(
+            TASK_DATA_ROOT=tmp_path / "tasks",
+            MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        ):
+            algorithm_key = _register_test_algorithm(
+                runner=_optional_device_model_runner,
+            )
+            _, version_id = _create_published_version(algorithm_key=algorithm_key)
+            user = get_user_model().objects.create_user(
+                username=f"adapter-metadata-{uuid4().hex}",
+                password="Dawn-valley-483!strong",
+            )
+            input_cases = (
+                (
+                    {"deviceModel": "Pixel 9"},
+                    {"has_metadata": True, "device_model": "Pixel 9"},
+                ),
+                ({}, {"has_metadata": True, "device_model": None}),
+                (None, {"has_metadata": False, "device_model": None}),
+            )
+            actual_payloads = []
+            for client_metadata, _ in input_cases:
+                task, token = _create_running_task(
+                    user=user,
+                    version_id=version_id,
+                    profile_snapshot={},
+                    client_metadata=client_metadata,
+                )
+                result = run_task_inference(
+                    task_id=task.pk,
+                    execution_token=token,
+                )
+                assert result is not None
+                actual_payloads.append(dict(result.payload))
+    finally:
+        clear_version_runtime_cache()
+
+    assert actual_payloads == [expected for _, expected in input_cases]

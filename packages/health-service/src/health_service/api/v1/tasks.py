@@ -4,7 +4,7 @@ from typing import Annotated
 
 from asgiref.sync import sync_to_async
 from django.http import FileResponse, HttpRequest
-from ninja import File, Form, Router
+from ninja import Body, File, Form, Router
 from ninja.files import UploadedFile
 
 from health_service.api.responses import ApiResponse, success_response
@@ -18,7 +18,10 @@ from health_service.application.tasks import (
     upload_task_input,
 )
 from health_service.infrastructure.auth.access import ChannelAccessAuth
-from health_service.schemas.requests.tasks import CreateTaskRequest
+from health_service.schemas.requests.tasks import (
+    CreateTaskRequest,
+    SubmitTaskRequest,
+)
 from health_service.schemas.responses.tasks import (
     TaskDetailResponse,
     TaskInputFileResponse,
@@ -208,6 +211,7 @@ async def submit_channel_task(
     request: HttpRequest,
     channel: str,
     task_id: int,
+    body: Annotated[SubmitTaskRequest, Body(None)],
 ):
     """校验当前选中输入、冻结本人资料并提交草稿。"""
     require_authenticated_channel(request, channel)
@@ -218,5 +222,6 @@ async def submit_channel_task(
         task_id=task_id,
         user_id=request.user.pk,
         channel=channel,
+        client_metadata=body.client_metadata if body is not None else None,
     )
     return success_response(request, to_task_summary_response(task))
