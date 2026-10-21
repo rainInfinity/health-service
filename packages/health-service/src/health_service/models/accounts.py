@@ -12,6 +12,14 @@ class User(AuditModel, AbstractUser):
         blank=True,
         db_comment="手机号；逻辑删除后仍占用",
     )
+    registration_channel = models.ForeignKey(
+        "health_service.Channel",
+        on_delete=models.PROTECT,
+        related_name="registered_users",
+        null=True,
+        blank=True,
+        db_comment="账号首次注册来源渠道；历史来源未知时为空",
+    )
     deleted_at = models.DateTimeField(
         null=True,
         blank=True,

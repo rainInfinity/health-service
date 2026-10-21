@@ -46,6 +46,7 @@ async def register(request: HttpRequest, channel: str, body: AccountCredentialsR
         account = await sync_to_async(register_user, thread_sensitive=True)(
             username=body.username,
             password=body.password,
+            channel=channel,
         )
     except UsernameAlreadyExists as error:
         raise ApiError(ApiErrorCode.USERNAME_EXISTS) from error

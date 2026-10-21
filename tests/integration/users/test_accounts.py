@@ -6,13 +6,16 @@ from threading import Barrier
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, close_old_connections, connection, connections
+from django.db.migrations.executor import MigrationExecutor
+from django.utils import timezone
 from health_service.application.accounts import UsernameAlreadyExists, register_user
-from health_service.models import Profile
+from health_service.models import Channel, Profile
 
 
 @pytest.mark.django_db(transaction=True)
 def test_registration_rolls_back_account_when_profile_insert_fails():
     """用真实 PostgreSQL 触发器验证资料创建失败会回滚账号。"""
+    channel = "android-cn"
     username = "registration-profile-failure"
     with connection.cursor() as cursor:
         cursor.execute("DROP TRIGGER IF EXISTS health_service_test_fail_profile ON health_profile")
@@ -36,14 +39,21 @@ def test_registration_rolls_back_account_when_profile_insert_fails():
 
     try:
         with pytest.raises(IntegrityError):
-            register_user(username=username, password="Violet-forest-549!strong")
+            register_user(
+                username=username,
+                password="Violet-forest-549!strong",
+                channel=channel,
+            )
     finally:
         with connection.cursor() as cursor:
-            cursor.execute("DROP TRIGGER IF EXISTS health_service_test_fail_profile ON health_profile")
+            cursor.execute(
+                "DROP TRIGGER IF EXISTS health_service_test_fail_profile ON health_profile"
+            )
             cursor.execute("DROP FUNCTION IF EXISTS health_service_test_fail_profile_insert()")
 
     assert not get_user_model().objects.filter(username=username).exists()
     assert not Profile.objects.filter(user__username=username).exists()
+    assert not Channel.objects.filter(label=channel).exists()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -60,7 +70,11 @@ def test_non_username_integrity_failure_is_not_reported_as_duplicate_username():
 
     try:
         with pytest.raises(IntegrityError):
-            register_user(username=username, password="Violet-forest-549!strong")
+            register_user(
+                username=username,
+                password="Violet-forest-549!strong",
+                channel="android-intl",
+            )
     finally:
         with connection.cursor() as cursor:
             cursor.execute(f"ALTER TABLE health_user DROP CONSTRAINT IF EXISTS {constraint_name}")
@@ -82,7 +96,11 @@ def test_concurrent_duplicate_registration_commits_one_account_and_profile():
         try:
             barrier.wait(timeout=10)
             try:
-                register_user(username=username, password=password)
+                register_user(
+                    username=username,
+                    password=password,
+                    channel="android-cn",
+                )
             except UsernameAlreadyExists:
                 return "conflict"
             return "created"
@@ -95,3 +113,39 @@ def test_concurrent_duplicate_registration_commits_one_account_and_profile():
     assert sorted(outcomes) == ["conflict", "created"]
     user = get_user_model().objects.get(username=username)
     assert Profile.objects.filter(user_id=user.pk).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_registration_channel_migration_preserves_legacy_account():
+    """验证新增可空关系保留历史账号数据并将未知来源置空。"""
+    previous = ("health_service", "0008_task_attempt_count_task_execution_token_and_more")
+    executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes()
+
+    try:
+        executor.migrate([previous])
+        old_apps = executor.loader.project_state([previous]).apps
+        old_user_model = old_apps.get_model("health_service", "User")
+        now = timezone.now()
+        legacy_user = old_user_model.objects.create(
+            username="registration-migration-legacy",
+            password="not-a-real-hash",
+            phone=None,
+            is_staff=False,
+            is_superuser=False,
+            created_at=now,
+            updated_at=now,
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(latest)
+        current_apps = executor.loader.project_state(latest).apps
+        migrated_user = current_apps.get_model("health_service", "User").objects.get(
+            pk=legacy_user.pk
+        )
+
+        assert migrated_user.username == "registration-migration-legacy"
+        assert migrated_user.password == "not-a-real-hash"
+        assert migrated_user.registration_channel_id is None
+    finally:
+        MigrationExecutor(connection).migrate(latest)

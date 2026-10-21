@@ -4,19 +4,21 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 
 from health_service.infrastructure.persistence.exceptions import UsernameConflictError
+from health_service.models import Channel
 from health_service.schemas.internal import AccountSummary
 
 
-def create_account(*, username: str, password: str) -> AccountSummary:
-    """创建无手机号、无管理权限的账号并返回最小结果。"""
+def create_account(*, username: str, password: str, registration_channel: str) -> AccountSummary:
+    """创建带注册来源、无手机号和管理权限的账号并返回最小结果。"""
     user_model = get_user_model()
+    channel, _ = Channel.objects.get_or_create(label=registration_channel)
     try:
         user = user_model.objects.create_user(
             username=username,
             password=password,
             phone=None,
             is_staff=False,
-            is_superuser=False,
+            registration_channel=channel,
         )
     except IntegrityError as error:
         if _is_username_conflict(error, user_model):

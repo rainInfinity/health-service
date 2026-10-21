@@ -153,17 +153,21 @@ async def _close_worker_database_connection() -> None:
     await sync_to_async(connections.close_all, thread_sensitive=True)()
 
 
+@pytest.mark.parametrize(
+    "channel",
+    ("android-cn", "android-intl", "ios-cn", "ios-intl", "wxapp"),
+)
 @pytest.mark.django_db(transaction=True)
-def test_registration_creates_hashed_user_and_empty_profile_atomically():
+def test_registration_creates_hashed_user_and_empty_profile_atomically(channel: str):
     """验证注册公开字段、密码哈希及账号资料的一致创建。"""
-    username = "register-flow-user"
+    username = f"register-flow-{channel}"
     password = "Violet-plateau-541!strong"
 
     async def send_request():
         client = AsyncClient()
         response = await _register(
             client,
-            "android-cn",
+            channel,
             {"username": username, "password": password},
         )
         await _close_worker_database_connection()
@@ -177,6 +181,7 @@ def test_registration_creates_hashed_user_and_empty_profile_atomically():
     assert response.status_code == 201
     assert response.json()["code"] == "OK"
     assert response.json()["data"] == {"userId": user.pk, "username": username}
+    assert user.registration_channel.label == channel
     assert response.json()["requestId"] == response["X-Request-ID"]
     assert user.check_password(password)
     assert user.password != password
@@ -214,6 +219,15 @@ def test_registration_rejects_duplicate_invalid_and_privileged_inputs():
             ),
             await _register(
                 client,
+                "android-cn",
+                {
+                    "username": "forged-source-user",
+                    "password": "Copper-orchid-738!strong",
+                    "sourceChannel": "ios-intl",
+                },
+            ),
+            await _register(
+                client,
                 "manager",
                 {"username": "manager-user", "password": "Copper-orchid-738!strong"},
             ),
@@ -221,7 +235,9 @@ def test_registration_rejects_duplicate_invalid_and_privileged_inputs():
         await _close_worker_database_connection()
         return responses
 
-    first, duplicate, invalid_password, privileged, manager = asyncio.run(send_requests())
+    first, duplicate, invalid_password, privileged, forged_source, manager = asyncio.run(
+        send_requests()
+    )
 
     assert first.status_code == 201
     assert duplicate.status_code == 409
@@ -231,11 +247,20 @@ def test_registration_rejects_duplicate_invalid_and_privileged_inputs():
     assert invalid_password.json()["code"] == "INVALID_INPUT"
     assert privileged.status_code == 422
     assert privileged.json()["code"] == "INVALID_INPUT"
+    assert forged_source.status_code == 422
+    assert forged_source.json()["code"] == "INVALID_INPUT"
     assert manager.status_code == 404
     assert manager.json()["code"] == "NOT_FOUND"
     assert (
         not get_user_model()
-        .objects.filter(username__in={"invalid-password-user", "privileged-user", "manager-user"})
+        .objects.filter(
+            username__in={
+                "invalid-password-user",
+                "privileged-user",
+                "forged-source-user",
+                "manager-user",
+            }
+        )
         .exists()
     )
     assert Profile.objects.filter(user__username=username).count() == 1
@@ -285,6 +310,9 @@ def test_password_login_issues_channel_bound_tokens_for_one_account():
     assert android_pair["accessToken"] != wxapp_pair["accessToken"]
     assert android_pair["refreshToken"] != wxapp_pair["refreshToken"]
     assert get_user_model().objects.filter(username=username).count() == 1
+    assert (
+        get_user_model().objects.get(username=username).registration_channel.label == "android-cn"
+    )
     assert Profile.objects.filter(user__username=username).count() == 1
 
 
@@ -335,6 +363,7 @@ def test_login_failures_have_the_same_public_credentials_error():
         "用户名或密码错误"
     ] * 3
     assert all(response.json()["data"] is None for response in (missing, incorrect, inactive))
+
 
 @pytest.mark.django_db(transaction=True)
 def test_manager_login_requires_staff_and_uses_manager_channel_tokens():
@@ -410,7 +439,9 @@ def test_manager_login_requires_staff_and_uses_manager_channel_tokens():
     assert AccessToken(manager_pair["accessToken"])["channel"] == "manager"
     assert RefreshToken(manager_pair["refreshToken"])["channel"] == "manager"
     assert manager_ordinary_login.status_code == 200
-    assert AccessToken(manager_ordinary_login.json()["data"]["accessToken"])["channel"] == "android-cn"
+    assert (
+        AccessToken(manager_ordinary_login.json()["data"]["accessToken"])["channel"] == "android-cn"
+    )
 
     failures = (ordinary_denied, bad_password, missing_user, inactive_denied)
     assert [response.status_code for response in failures] == [401] * 4
@@ -495,6 +526,7 @@ def test_refresh_rotates_once_and_rejects_replay_wrong_channel_and_inactive_user
     assert inactive.json()["code"] == "INVALID_TOKEN"
     assert OutstandingToken.objects.count() == token_count_before_inactive_attempt
 
+
 @pytest.mark.django_db(transaction=True)
 def test_manager_refresh_rechecks_staff_but_logout_remains_available():
     """验证撤销管理权限阻止刷新但仍允许本人撤销管理 Refresh。"""
@@ -549,12 +581,10 @@ def test_manager_refresh_rechecks_staff_but_logout_remains_available():
     assert AccessToken(ordinary_refresh.json()["data"]["accessToken"])["channel"] == "android-cn"
 
 
-
 @pytest.mark.parametrize(
     ("channel", "is_staff"),
     [("ios-cn", False), ("manager", True)],
 )
-
 @pytest.mark.django_db(transaction=True)
 def test_concurrent_refresh_requests_rotate_one_old_jti_once(channel: str, is_staff: bool):
     """用两个 PostgreSQL 连接并发刷新，确认普通与管理令牌均只轮换一次。"""
@@ -642,5 +672,3 @@ def test_logout_uses_refresh_without_access_and_preserves_other_channel_tokens()
         "userId": user.pk,
         "username": "logout-refresh-user",
     }
-
-

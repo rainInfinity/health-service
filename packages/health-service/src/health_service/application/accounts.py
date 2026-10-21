@@ -29,8 +29,8 @@ class UsernameAlreadyExists(Exception):
     """表示注册用户名已被其他账号占用。"""
 
 
-def register_user(*, username: str, password: str) -> AccountSummary:
-    """校验注册信息，并在同一事务内创建账号及空资料。"""
+def register_user(*, username: str, password: str, channel: str) -> AccountSummary:
+    """校验注册信息，并在同一事务内创建账号、来源渠道及空资料。"""
     user_model = get_user_model()
     normalized_username = user_model.normalize_username(username)
     username_field = user_model._meta.get_field("username")
@@ -40,7 +40,11 @@ def register_user(*, username: str, password: str) -> AccountSummary:
 
     try:
         with transaction.atomic():
-            account = create_account(username=normalized_username, password=password)
+            account = create_account(
+                username=normalized_username,
+                password=password,
+                registration_channel=channel,
+            )
             create_profile(user_id=account.user_id)
     except UsernameConflictError as error:
         raise UsernameAlreadyExists from error
@@ -53,13 +57,9 @@ def login_user(*, username: str, password: str, channel: str) -> IssuedTokenPair
     user_model = get_user_model()
     normalized_username = user_model.normalize_username(username)
     user = authenticate(username=normalized_username, password=password)
-    if user is None or (
-        channel == ChannelLabel.MANAGER.value and not user.is_staff
-    ):
+    if user is None or (channel == ChannelLabel.MANAGER.value and not user.is_staff):
         raise InvalidCredentials
     return issue_token_pair(user, channel)
-
-
 
 
 def refresh_user_tokens(*, raw_token: str, channel: str) -> IssuedTokenPair:
