@@ -1,0 +1,92 @@
+# 推理任务流程
+
+## 推理任务草稿、上传、提交与查询
+
+先使用当前普通渠道登录取得 Access，并查询渠道已配置模型及其 `requiredInputs`。创建请求只提交 `modelId`；账号和来源渠道均从令牌确定，客户端不能指定 `userId` 或任意 `versionId`：
+
+```sh
+CHANNEL=ios-cn
+API=http://127.0.0.1:8000/api/v1
+ACCESS_TOKEN='<该渠道登录响应中的 data.accessToken>'
+MODEL_ID='<GET /api/v1/ios-cn/models 返回的 data.items[].modelId>'
+
+curl --include --request POST "$API/$CHANNEL/tasks" \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "{\"modelId\":$MODEL_ID}"
+```
+
+创建成功返回 HTTP 201 和 `taskId`、固定模型版本、`status: DRAFT` 及 `isExample`。未配置给当前渠道的模型不能创建草稿；请求额外包含 `userId`、`versionId` 或权限字段会被拒绝。
+
+只可向本人当前渠道的 `DRAFT` 上传算法声明的逻辑输入名。请求使用 multipart 的 `logicalName` 和 `file`；文件完整写入后才登记为当前选择：
+
+```sh
+TASK_ID='<创建响应中的 data.taskId>'
+curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/files" \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --form 'logicalName=ppg' \
+  --form 'file=@docs/examples/hr-br/ppg.csv'
+```
+
+逻辑名必须来自模型目录返回的算法输入契约，例如示例算法使用 `ppg`。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
+
+最终提交不接收请求体：
+
+```sh
+curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/submit" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+提交返回 HTTP 200 和 `SUBMITTED` 摘要。服务按“渠道 → 当前版本选择 → 任务 → 用户 → 资料”加锁，检查固定版本仍是当前选择、算法要求的每个输入都已选中且实际文件可读，再冻结当前完整资料和提交日期对应的 `age_years`。缺少资料或出生日期时不创建资料记录，年龄保持 `null`；未知病史键继续缺席，不填默认值。提交阶段只验证逻辑文件齐全和可读，不解析 CSV 或提前执行算法资料校验；算法必需资料在消费者运行时依固定版本契约检查。
+
+任务列表采用创建时间、任务 ID 稳定倒序；`offset` 必须非负，`limit` 为 1–100、默认 20。列表只返回状态、固定版本、示例标志和业务时间，不加载完整结果或资料快照：
+
+```sh
+curl --include "$API/$CHANNEL/tasks?offset=0&limit=20" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+curl --include "$API/$CHANNEL/tasks/$TASK_ID" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+详情对 `SUCCEEDED` 返回数据库保存的完整权威 `result`，不会重新运行算法或从指标行重组结果；对 `FAILED` 只返回安全 `failureCode`、`failureMessage` 和完成时间，不返回 `failure_detail`、资料快照、原始输入或本地绝对路径。只有状态为 `FAILED`、错误码为 `INFERENCE.QUALITY_REJECTED` 且历史明细通过校验时，`qualityFailure` 才包含类型化白名单信息：
+
+```json
+{
+  "qualityFailure": {
+    "reason": "LOW_SCORE",
+    "details": {"score": 61.25, "threshold": 70}
+  }
+}
+```
+
+无可用信号不提供评分或阈值：
+
+```json
+{
+  "qualityFailure": {
+    "reason": "NO_VALID_SIGNAL",
+    "details": null
+  }
+}
+```
+
+成功任务、普通失败、缺少明细或损坏的历史明细中，`qualityFailure` 为 `null`。客户端应按稳定的 `reason` 值分支，不解析本地化的 `failureMessage`。查询、上传、提交及下载都同时按账号及任务来源渠道授权；跨账号或跨来源渠道的任务返回 404。重复提交及不允许的状态变更返回冲突，任务不能由用户重置或改写固定版本。
+
+### 下载当前或历史输入及成功输出
+
+上传响应中的 `fileId` 可用于下载本人任务的当前或历史输入；同名重传不会删除旧文件。成功任务 `result.output_files` 的逻辑名可用于下载处理后文件。两类下载都要求 Access Token 的渠道与路径一致，并同时匹配任务所属账号和来源渠道；管理令牌不能绕过此归属检查。输出仅在任务为 `SUCCEEDED` 且该逻辑名已进入权威结果时可下载。请求不接受存储键或本地路径：
+
+```sh
+FILE_ID='<上传响应中的 fileId>'
+curl --fail --show-error --output ./input-history.csv \
+  "$API/$CHANNEL/tasks/$TASK_ID/files/$FILE_ID/download" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+
+OUTPUT_NAME='<成功结果 result.output_files 中的逻辑名>'
+curl --fail --show-error --output ./result-output.bin \
+  "$API/$CHANNEL/tasks/$TASK_ID/outputs/$OUTPUT_NAME/download" \
+  --header "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+成功下载返回 `FileResponse` 原始文件字节，不使用 JSON 业务包装；令牌渠道与请求路径不一致返回 403，任务账号或来源渠道不匹配、未知文件或逻辑名、缺失物理文件及失败／失租输出返回安全 404，不暴露存储路径。没有已登记 `output_files` 的成功结果不提供输出下载。
+
