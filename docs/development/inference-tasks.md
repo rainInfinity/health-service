@@ -16,19 +16,20 @@ curl --include --request POST "$API/$CHANNEL/tasks" \
   --data "{\"modelId\":$MODEL_ID}"
 ```
 
-创建成功返回 HTTP 201 和 `taskId`、固定模型版本、`status: DRAFT` 及 `isExample`。未配置给当前渠道的模型不能创建草稿；请求额外包含 `userId`、`versionId` 或权限字段会被拒绝。
+创建成功返回 HTTP 201 和 `taskId`、固定模型版本、`status: DRAFT` 及按算法定义派生的 `isExample`；正式 PPG v1 返回 `false`。未配置给当前渠道的模型不能创建草稿；请求额外包含 `userId`、`versionId` 或权限字段会被拒绝。
 
 只可向本人当前渠道的 `DRAFT` 上传算法声明的逻辑输入名。请求使用 multipart 的 `logicalName` 和 `file`；文件完整写入后才登记为当前选择：
 
 ```sh
 TASK_ID='<创建响应中的 data.taskId>'
+PPG_FILE='/本机路径/符合正式 PPG v1 输入条件的文件.csv'
 curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/files" \
   --header "Authorization: Bearer $ACCESS_TOKEN" \
   --form 'logicalName=ppg' \
-  --form 'file=@docs/examples/hr-br/ppg.csv'
+  --form "file=@$PPG_FILE"
 ```
 
-逻辑名必须来自模型目录返回的算法输入契约，例如示例算法使用 `ppg`。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
+逻辑名必须来自模型目录返回的算法输入契约；正式 PPG v1 使用 `ppg`。上传文件应满足[正式算法的 CSV 格式、采样率和滤波长度要求](algorithms/ppg-active-offline-hr-br-v1.md)，仓库不附带可直接用于此算法的短样例。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
 
 最终提交不接收请求体：
 
@@ -39,7 +40,7 @@ curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/submit" \
 
 提交返回 HTTP 200 和 `SUBMITTED` 摘要。服务按“渠道 → 当前版本选择 → 任务 → 用户 → 资料”加锁，检查固定版本仍是当前选择、算法要求的每个输入都已选中且实际文件可读，再冻结当前完整资料和提交日期对应的 `age_years`。缺少资料或出生日期时不创建资料记录，年龄保持 `null`；未知病史键继续缺席，不填默认值。提交阶段只验证逻辑文件齐全和可读，不解析 CSV 或提前执行算法资料校验；算法必需资料在消费者运行时依固定版本契约检查。
 
-任务列表采用创建时间、任务 ID 稳定倒序；`offset` 必须非负，`limit` 为 1–100、默认 20。列表只返回状态、固定版本、示例标志和业务时间，不加载完整结果或资料快照：
+任务列表采用创建时间、任务 ID 稳定倒序；`offset` 必须非负，`limit` 为 1–100、默认 20。列表只返回状态、固定版本、`isExample` 和业务时间，不加载完整结果或资料快照：
 
 ```sh
 curl --include "$API/$CHANNEL/tasks?offset=0&limit=20" \
@@ -71,6 +72,19 @@ curl --include "$API/$CHANNEL/tasks/$TASK_ID" \
 ```
 
 成功任务、普通失败、缺少明细或损坏的历史明细中，`qualityFailure` 为 `null`。客户端应按稳定的 `reason` 值分支，不解析本地化的 `failureMessage`。查询、上传、提交及下载都同时按账号及任务来源渠道授权；跨账号或跨来源渠道的任务返回 404。重复提交及不允许的状态变更返回冲突，任务不能由用户重置或改写固定版本。
+
+### 失败类别与安全文案
+
+失败任务仍由详情返回安全 `failureCode` 和 `failureMessage`；普通失败的 `qualityFailure` 为 `null`，内部 `failure_detail` 不通过接口返回。输入原因不会新增响应字段，服务端只把受控原因转换为固定文案：
+
+| 类别 | `failureCode` | `failureMessage` 与详情 |
+|---|---|---|
+| 输入错误 | `INFERENCE.INVALID_INPUT` | 按受控原因显示固定文案，例如多块输入为“当前算法版本仅支持单块 PPG”，非递增时间戳为“PPG 时间戳必须为有限且严格递增的毫秒数值”，样本不足为“PPG 数据不足以执行本算法所需处理”；`qualityFailure` 为 `null`。 |
+| 质量拒绝 | `INFERENCE.QUALITY_REJECTED` | 显示质量拒绝摘要；合法拒绝另通过 `qualityFailure.reason` 区分，`LOW_SCORE` 保留实际评分与阈值。 |
+| 结果无效 | `RESULT.INVALID_OUTPUT` | 显示“推理结果格式无效”；不伪装成输入错误或质量拒绝，`qualityFailure` 为 `null`。 |
+
+旧版通用输入异常和无法识别的原因继续使用“推理输入无效”。客户端按稳定失败码及合法 `qualityFailure.reason` 分支，不解析本地化文案，也不要求服务器返回异常正文或路径。
+
 
 ### 下载当前或历史输入及成功输出
 
