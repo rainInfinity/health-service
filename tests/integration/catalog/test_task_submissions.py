@@ -27,9 +27,11 @@ from health_service.application.tasks import (
 from health_service.infrastructure.storage import LocalFileStorage, StorageArea
 from health_service.models import ChannelModelSelection, Profile, Task, TaskInputFile
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 def _create_draft(*, username: str):
-    """创建当前选择已发布示例版本的普通渠道草稿。"""
+    """创建当前选择已发布测试算法版本的普通渠道草稿。"""
     user = get_user_model().objects.create_user(
         username=username,
         password="Cobalt-river-782!strong",
@@ -38,7 +40,7 @@ def _create_draft(*, username: str):
     version_draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=version_draft.version_id)
@@ -269,7 +271,7 @@ def test_submission_and_version_switch_preserve_serialized_state(tmp_path):
     next_draft = create_model_version(
         model_id=model.model_id,
         version="2.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     next_version = publish_model_version(version_id=next_draft.version_id)

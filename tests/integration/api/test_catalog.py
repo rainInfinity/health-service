@@ -27,8 +27,8 @@ async def _close_worker_database_connection() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_manager_publishes_example_and_users_see_only_their_channel():
-    """HTTP 完成示例发布和渠道选择，普通响应不泄露内部配置。"""
+def test_manager_publishes_ppg_v1_and_users_see_only_their_channel():
+    """HTTP 发布正式 PPG v1，普通响应不泄露内部配置。"""
     user_model = get_user_model()
     manager = user_model.objects.create_user(
         username="catalog-manager",
@@ -69,7 +69,7 @@ def test_manager_publishes_example_and_users_see_only_their_channel():
 
         model_response = await client.post(
             "/api/v1/manager/models",
-            data=json.dumps({"code": "hr-br", "name": "HR/BR 示例"}),
+            data=json.dumps({"code": "hr-br", "name": "HR/BR v1"}),
             content_type="application/json",
             headers=manager_headers,
         )
@@ -79,7 +79,7 @@ def test_manager_publishes_example_and_users_see_only_their_channel():
             data=json.dumps(
                 {
                     "version": "1.0.0",
-                    "algorithmKey": "hr_br.example",
+                    "algorithmKey": "ppg.active.offline.hr_br.v1",
                     "params": None,
                 }
             ),
@@ -89,22 +89,16 @@ def test_manager_publishes_example_and_users_see_only_their_channel():
         version_data = version_response.json()["data"]
         metric_payloads = (
             {
-                "code": "example.ppg.sample_count",
-                "description": "PPG 样本数",
+                "code": "hr",
+                "description": "心率",
                 "valueType": "number",
-                "unit": "samples",
+                "unit": "beats_per_minute",
             },
             {
-                "code": "example.ppg.duration_seconds",
-                "description": "PPG 时长",
+                "code": "br",
+                "description": "呼吸率",
                 "valueType": "number",
-                "unit": "seconds",
-            },
-            {
-                "code": "example.ppg.sampling_rate_hz",
-                "description": "PPG 平均采样率",
-                "valueType": "number",
-                "unit": "hertz",
+                "unit": "breaths_per_minute",
             },
         )
         metric_responses = []
@@ -213,18 +207,18 @@ def test_manager_publishes_example_and_users_see_only_their_channel():
         publish_response.status_code,
         selection_response.status_code,
     ] == [200, 200, 200, 201, 201, 200, 200, 200]
-    assert [response.status_code for response in metric_responses] == [201, 201, 201]
+    assert [response.status_code for response in metric_responses] == [201, 201]
     ios_payload = ios_models.json()["data"]
     assert ios_payload["total"] == 1
     assert ios_payload["items"] == [
         {
             "modelId": model_response.json()["data"]["modelId"],
             "modelCode": "hr-br",
-            "modelName": "HR/BR 示例",
+            "modelName": "HR/BR v1",
             "versionId": version_response.json()["data"]["versionId"],
             "version": "1.0.0",
             "requiredInputs": ["ppg"],
-            "isExample": True,
+            "isExample": False,
         }
     ]
     assert android_models.json()["data"]["items"] == []

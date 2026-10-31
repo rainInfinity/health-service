@@ -18,6 +18,8 @@ from health_service.application.catalog import (
 from health_service.application.tasks import create_task_draft
 from health_service.models import Task
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 async def _login(client: AsyncClient, channel: str, username: str, password: str):
     """通过真实登录接口获取指定渠道令牌。"""
@@ -49,7 +51,7 @@ def test_user_task_routes_enforce_owner_channel_and_request_contract():
     version_draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=version_draft.version_id)
@@ -195,7 +197,7 @@ def test_user_task_routes_enforce_owner_channel_and_request_contract():
     assert created.status_code == 201
     assert created.json()["data"]["status"] == Task.StatusChoices.DRAFT
     assert created.json()["data"]["versionId"] == version.version_id
-    assert created.json()["data"]["isExample"] is True
+    assert created.json()["data"]["isExample"] is False
     assert forged_user.status_code == forged_version.status_code == 422
     assert unconfigured.status_code == 404
     assert page.status_code == 200
@@ -234,7 +236,7 @@ def test_quality_rejection_task_details_are_whitelisted_and_discriminated():
     version_draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=version_draft.version_id)

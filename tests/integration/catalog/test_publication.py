@@ -5,8 +5,14 @@ from pathlib import Path
 
 import pytest
 from django.test import override_settings
+from health_inference import register_algorithm
 from health_inference.registry import _ALGORITHMS
-from health_inference.types import AlgorithmDefinition, InferenceInput, InferenceOutput
+from health_inference.types import (
+    AlgorithmDefinition,
+    InferenceInput,
+    InferenceOutput,
+    MetricContract,
+)
 from health_service.application.catalog import (
     create_metric_definition,
     create_model,
@@ -26,37 +32,33 @@ from health_service.infrastructure.persistence.catalog import (
 )
 from health_service.models import MetricDefinition, ModelArtifact, ModelVersionMetric
 
+_PUBLISHABLE_TEST_KEY = "test.catalog.publisher"
+_PUBLISHABLE_TEST_METRIC = "test.catalog.value"
 
-def _create_example_version(*, code: str = "pulse", params: dict | None = None):
-    """创建 HR/BR 非临床示例的未发布版本。"""
+
+def _create_test_catalog_version(*, code: str = "pulse", params: dict | None = None):
+    """创建目录发布边界测试使用的未发布版本。"""
     model = create_model(code=code, name="Pulse", description=None)
     return create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=_PUBLISHABLE_TEST_KEY,
         params=params,
     )
 
 
-def _add_example_metrics(version_id: int) -> None:
-    """创建并选择示例算法声明的三个带单位指标。"""
-    definitions = (
-        ("example.ppg.sample_count", "number", "samples"),
-        ("example.ppg.duration_seconds", "number", "seconds"),
-        ("example.ppg.sampling_rate_hz", "number", "hertz"),
+def _add_test_catalog_metric(version_id: int) -> None:
+    """选择测试算法声明的单个计数指标。"""
+    create_metric_definition(
+        code=_PUBLISHABLE_TEST_METRIC,
+        description="测试发布指标",
+        value_type="number",
+        unit="count",
     )
-    for code, value_type, unit in definitions:
-        create_metric_definition(
-            code=code,
-            description=code,
-            value_type=value_type,
-            unit=unit,
-        )
     set_model_version_metrics(
         version_id=version_id,
-        metric_codes=tuple(code for code, _, _ in definitions),
+        metric_codes=(_PUBLISHABLE_TEST_METRIC,),
     )
-
 
 def _validate_test_parameters(params):
     """测试算法不接受任何发布参数。"""
@@ -71,6 +73,24 @@ def _validate_test_result(output):
 def _run_test_algorithm(inference_input: InferenceInput) -> InferenceOutput:
     """阻止发布测试意外进入实际算法执行。"""
     raise AssertionError("发布校验不应执行算法")
+
+
+def _publishable_test_algorithm() -> AlgorithmDefinition:
+    """构造目录发布校验所需的测试专用契约。"""
+    return AlgorithmDefinition(
+        key=_PUBLISHABLE_TEST_KEY,
+        is_example=False,
+        required_inputs=(),
+        required_artifacts=(),
+        required_profile_fields=(),
+        parameter_validator=_validate_test_parameters,
+        result_validator=_validate_test_result,
+        runner=_run_test_algorithm,
+        metric_contracts=(MetricContract(_PUBLISHABLE_TEST_METRIC, "number", "count"),),
+    )
+
+
+register_algorithm(_publishable_test_algorithm())
 
 
 def _required_artifact_algorithm() -> AlgorithmDefinition:
@@ -96,7 +116,7 @@ def test_artifact_upload_registers_complete_file_and_removes_duplicate_orphan(tm
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         MAX_UPLOAD_BYTES=32,
     ):
-        version = _create_example_version()
+        version = _create_test_catalog_version()
         artifact = upload_model_artifact(
             version_id=version.version_id,
             logical_name="weights",
@@ -123,12 +143,12 @@ def test_artifact_upload_registers_complete_file_and_removes_duplicate_orphan(tm
 @pytest.mark.django_db
 def test_unknown_metric_does_not_replace_existing_projection():
     """未知代码拒绝整批替换并保留原有合法指标集合。"""
-    version = _create_example_version()
+    version = _create_test_catalog_version()
     metric = create_metric_definition(
-        code="example.ppg.sample_count",
-        description="样本数",
+        code=_PUBLISHABLE_TEST_METRIC,
+        description="测试指标",
         value_type="number",
-        unit="samples",
+        unit="count",
     )
 
     with pytest.raises(CatalogConflict):
@@ -160,18 +180,18 @@ def test_unknown_metric_does_not_replace_existing_projection():
 )
 def test_mismatched_metric_contract_is_rejected(value_type, unit):
     """指标类型或单位与算法契约不匹配时拒绝投影。"""
-    version = _create_example_version()
+    version = _create_test_catalog_version()
     with pytest.raises(CatalogConfigurationInvalid):
         create_metric_definition(
-            code="example.ppg.sample_count",
+            code=_PUBLISHABLE_TEST_METRIC,
             description="错误类型",
             value_type="boolean",
-            unit="samples",
+            unit="count",
         )
 
     mismatched = MetricDefinition.objects.create(
-        code="example.ppg.sample_count",
-        description="错误语义",
+        code=_PUBLISHABLE_TEST_METRIC,
+        description="测试指标语义",
         value_type=value_type,
         unit=unit,
     )
@@ -186,15 +206,15 @@ def test_mismatched_metric_contract_is_rejected(value_type, unit):
 
 
 @pytest.mark.django_db
-def test_example_version_publishes_without_artifacts_and_is_immutable(tmp_path):
-    """零制品示例可发布，重发不改时间且已发布配置不能变更。"""
+def test_test_algorithm_version_publishes_without_artifacts_and_is_immutable(tmp_path):
+    """零制品测试算法可发布，重发不改时间且已发布配置不能变更。"""
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         MAX_UPLOAD_BYTES=32,
     ):
-        version = _create_example_version()
-        _add_example_metrics(version.version_id)
+        version = _create_test_catalog_version()
+        _add_test_catalog_metric(version.version_id)
         published = publish_model_version(version_id=version.version_id)
         repeated = publish_model_version(version_id=version.version_id)
 
@@ -218,9 +238,12 @@ def test_example_version_publishes_without_artifacts_and_is_immutable(tmp_path):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("algorithm_key", ["hr_br", "missing.algorithm"])
+@pytest.mark.parametrize(
+    "algorithm_key",
+    ["hr_br", "ppg.active.offline.hr_br", "missing.algorithm"],
+)
 def test_template_and_unknown_algorithms_cannot_be_published(algorithm_key):
-    """正式接口模板及未知标识都没有可执行注册定义。"""
+    """旧模板、无修订号别名和未知标识都不能发布。"""
     model = create_model(code="pulse", name="Pulse", description=None)
     version = create_model_version(
         model_id=model.model_id,
@@ -238,8 +261,8 @@ def test_template_and_unknown_algorithms_cannot_be_published(algorithm_key):
 
 @pytest.mark.django_db
 def test_invalid_fixed_parameters_cannot_be_published():
-    """示例算法拒绝非空版本参数并保持版本未发布。"""
-    version = _create_example_version(params={"window": 2})
+    """测试算法拒绝非空版本参数并保持版本未发布。"""
+    version = _create_test_catalog_version(params={"window": 2})
 
     with pytest.raises(CatalogConfigurationInvalid):
         publish_model_version(version_id=version.version_id)
@@ -277,3 +300,62 @@ def test_publish_requires_exact_artifact_inventory_and_existing_file(tmp_path, m
         stored_path.unlink()
         with pytest.raises(CatalogConfigurationInvalid):
             publish_model_version(version_id=version.version_id)
+def _create_ppg_v1_version(*, params: dict | None = None):
+    """创建正式 HR/BR v1 的未发布版本。"""
+    model = create_model(code="pulse-v1", name="Pulse v1", description=None)
+    return create_model_version(
+        model_id=model.model_id,
+        version="1.0",
+        algorithm_key="ppg.active.offline.hr_br.v1",
+        params=params,
+    )
+
+
+def _add_ppg_v1_metrics(version_id: int) -> None:
+    """选择正式 v1 声明的两个固定单位指标。"""
+    definitions = (
+        ("hr", "beats_per_minute"),
+        ("br", "breaths_per_minute"),
+    )
+    for code, unit in definitions:
+        create_metric_definition(
+            code=code,
+            description=code,
+            value_type="number",
+            unit=unit,
+        )
+    set_model_version_metrics(
+        version_id=version_id,
+        metric_codes=tuple(code for code, _ in definitions),
+    )
+
+
+@pytest.mark.django_db
+def test_official_ppg_v1_publishes_without_artifacts(tmp_path):
+    """正式 v1 可按完整指标契约发布且无需模型制品。"""
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        version = _create_ppg_v1_version()
+        _add_ppg_v1_metrics(version.version_id)
+
+        published = publish_model_version(version_id=version.version_id)
+
+    assert published.published_at is not None
+    assert not ModelArtifact.objects.filter(model_version_id=version.version_id).exists()
+    assert tuple(
+        metric.code for metric in list_model_version_metrics(version_id=version.version_id)
+    ) == ("hr", "br")
+
+
+@pytest.mark.django_db
+def test_official_ppg_v1_rejects_nonempty_parameters():
+    """正式 v1 的非空固定参数阻止发布。"""
+    version = _create_ppg_v1_version(params={"filter_order": 3})
+
+    with pytest.raises(CatalogConfigurationInvalid):
+        publish_model_version(version_id=version.version_id)
+
+    persisted = get_model_version(version_id=version.version_id)
+    assert persisted is not None and persisted.published_at is None

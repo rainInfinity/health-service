@@ -25,6 +25,8 @@ from health_service.application.tasks import (
 from health_service.models import Channel, Task
 from redis import Redis
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 def _create_submitted_tasks(count: int) -> list[Task]:
     """为同一已发布版本批量创建待派发任务。"""
@@ -40,7 +42,7 @@ def _create_submitted_tasks(count: int) -> list[Task]:
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)
@@ -263,7 +265,7 @@ def test_submit_dispatch_is_deferred_until_outer_database_commit(tmp_path):
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)

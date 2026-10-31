@@ -17,6 +17,8 @@ from health_service.application.catalog import (
 )
 from health_service.models import TaskInputFile
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 async def _login(client: AsyncClient, username: str, password: str):
     """通过真实普通渠道登录接口获取 Access。"""
@@ -42,7 +44,7 @@ def test_task_input_upload_http_contract(tmp_path):
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)

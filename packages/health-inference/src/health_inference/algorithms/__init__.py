@@ -1,6 +1,8 @@
-"""导入并注册仓库内置的纯 Python 示例算法。"""
+"""导入并注册仓库内置的正式算法。"""
 
-from health_inference.algorithms.hr_br.example import HR_BR_EXAMPLE
+from health_inference.algorithms.ppg_active_offline_hr_br_v1 import (
+    PPG_ACTIVE_OFFLINE_HR_BR_V1,
+)
 from health_inference.registry import register_algorithm
 
-register_algorithm(HR_BR_EXAMPLE)
+register_algorithm(PPG_ACTIVE_OFFLINE_HR_BR_V1)

@@ -23,9 +23,11 @@ from health_service.application.execution import (
 )
 from health_service.models import Channel, Task
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 def _create_submitted_task() -> Task:
-    """创建指向已发布示例版本的待执行任务。"""
+    """创建指向已发布测试版本的待执行任务。"""
     user = get_user_model().objects.create_user(
         username=f"execution-{uuid4().hex}",
         password="Dawn-valley-483!strong",
@@ -38,7 +40,7 @@ def _create_submitted_task() -> Task:
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)

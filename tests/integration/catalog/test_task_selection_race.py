@@ -15,6 +15,8 @@ from health_service.application.catalog import (
 from health_service.application.tasks import create_task_draft
 from health_service.models import ChannelModelSelection, Task
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 @pytest.mark.django_db(transaction=True)
 def test_concurrent_draft_creation_cannot_escape_model_switch():
@@ -23,14 +25,14 @@ def test_concurrent_draft_creation_cannot_escape_model_switch():
     old_draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     old_version = publish_model_version(version_id=old_draft.version_id)
     next_draft = create_model_version(
         model_id=model.model_id,
         version="2.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     next_version = publish_model_version(version_id=next_draft.version_id)

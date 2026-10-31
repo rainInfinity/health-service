@@ -552,8 +552,8 @@ def test_output_file_is_authoritative_only_after_valid_success_commit(
             tmp_path / "artifacts",
         )
         output_dir = storage.create_execution_output_dir(task.pk, token)
-        output_file = output_dir / "diagnostic.csv"
-        output_file.write_text("sample_count\n4\n", encoding="utf-8")
+        output_file = output_dir / "result.csv"
+        output_file.write_text("status\ncompleted\n", encoding="utf-8")
         storage_key = storage.validate_output_file(task.pk, token, output_file)
         result = PreparedInferenceResult(
             payload={"ok": True},
@@ -589,7 +589,7 @@ def test_output_file_is_authoritative_only_after_valid_success_commit(
             )
 
     task.refresh_from_db()
-    assert output_file.read_text(encoding="utf-8") == "sample_count\n4\n"
+    assert output_file.read_text(encoding="utf-8") == "status\ncompleted\n"
     if outcome == "success":
         assert task.status == Task.StatusChoices.SUCCEEDED
         assert task.result_payload == {

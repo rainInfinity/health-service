@@ -24,6 +24,8 @@ from health_service.application.tasks import create_task_draft, upload_task_inpu
 from health_service.infrastructure.storage import LocalFileStorage, StorageArea
 from health_service.models import Task, TaskInputFile
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 def _create_draft():
     """创建拥有 ppg 输入声明的当前渠道草稿。"""
@@ -35,7 +37,7 @@ def _create_draft():
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)

@@ -15,6 +15,7 @@ from health_inference import (
     QualityRejectionReason,
     get_algorithm,
 )
+from health_inference.exceptions import InputError, InputErrorReason
 
 from health_service.infrastructure.persistence import catalog as catalog_persistence
 from health_service.infrastructure.persistence import tasks as persistence
@@ -45,6 +46,18 @@ _SAFE_FAILURE_MESSAGES = {
     "RESULT.INVALID_OUTPUT": "推理结果格式无效",
 }
 
+_INPUT_FAILURE_MESSAGES = {
+    InputErrorReason.CSV_FORMAT: "PPG CSV 格式无效",
+    InputErrorReason.MISSING_COLUMN: "PPG CSV 缺少必需列",
+    InputErrorReason.INVALID_CHANNELS: "PPG 必须完整提供一组 RGB 或 YUV 通道",
+    InputErrorReason.INVALID_NUMERIC_VALUE: "PPG 通道必须为合法数值",
+    InputErrorReason.NON_FINITE_VALUE: "PPG 输入数值必须为有限值",
+    InputErrorReason.INVALID_TIMESTAMP: "PPG 时间戳必须为有限且严格递增的毫秒数值",
+    InputErrorReason.UNSUPPORTED_BLOCK_LAYOUT: "当前算法版本仅支持单块 PPG",
+    InputErrorReason.INSUFFICIENT_DATA: "PPG 数据不足以执行本算法所需处理",
+    InputErrorReason.INVALID_SAMPLING_RATE: "PPG 采样率不支持本算法所需处理",
+}
+
 _QUALITY_FAILURE_MESSAGES = {
     QualityRejectionReason.LOW_SCORE: "信号质量评分未达到要求，请重新采集",
     QualityRejectionReason.NO_VALID_SIGNAL: "未检测到可用信号，请重新采集",
@@ -72,7 +85,21 @@ def record_task_execution_failure(
 def _safe_failure_fields(
     error: InferenceError | None,
 ) -> tuple[str, str, dict[str, object] | None]:
-    """将受控质量拒绝白名单化，其余错误映射为固定安全失败。"""
+    """将受控输入原因和质量拒绝映射为固定安全失败。"""
+    if type(error) is InputError:
+        if getattr(error, "code", None) != "INFERENCE.INVALID_INPUT":
+            return (
+                "INFERENCE.EXECUTION_ERROR",
+                _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"],
+                None,
+            )
+        reason = getattr(error, "reason", None)
+        message = _INPUT_FAILURE_MESSAGES.get(reason) if type(reason) is InputErrorReason else None
+        return (
+            "INFERENCE.INVALID_INPUT",
+            message or _SAFE_FAILURE_MESSAGES["INFERENCE.INVALID_INPUT"],
+            None,
+        )
     if isinstance(error, QualityRejectedError):
         rejection = _validated_quality_rejection(error)
         if rejection is None:
@@ -164,9 +191,7 @@ def save_task_execution_success(
     )
     if context is None:
         return False
-    version = catalog_persistence.get_model_version(
-        version_id=context.model_version_id
-    )
+    version = catalog_persistence.get_model_version(version_id=context.model_version_id)
     if version is None or version.published_at is None:
         raise InferenceError("TASK.INVALID_VERSION", "模型版本不可用")
     algorithm = get_algorithm(version.algorithm_key)
@@ -247,9 +272,7 @@ def _project_selected_metrics(
     contracts = {contract.code: contract for contract in algorithm.metric_contracts}
     if len(contracts) != len(algorithm.metric_contracts):
         raise InferenceError("RESULT.INVALID_OUTPUT", "算法指标契约无效")
-    selected = catalog_persistence.list_model_version_metrics(
-        version_id=version_id
-    )
+    selected = catalog_persistence.list_model_version_metrics(version_id=version_id)
     selected_by_code = {metric.code: metric for metric in selected}
     for metric in selected:
         contract = contracts.get(metric.code)
@@ -267,9 +290,7 @@ def _project_selected_metrics(
             raise InferenceError("RESULT.INVALID_OUTPUT", "算法指标格式无效")
         definition = selected_by_code.get(code)
         if definition is not None:
-            projected.append(
-                ProjectedTaskMetricData(metric_id=definition.metric_id, value=value)
-            )
+            projected.append(ProjectedTaskMetricData(metric_id=definition.metric_id, value=value))
     return tuple(projected)
 
 

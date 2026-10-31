@@ -1,6 +1,22 @@
 """定义可安全跨越推理边界的稳定异常。"""
 
+from enum import StrEnum
+
 from .quality import QualityRejection
+
+
+class InputErrorReason(StrEnum):
+    """列出可安全映射给用户的受控输入失败原因。"""
+
+    CSV_FORMAT = "CSV_FORMAT"  # CSV 编码、表头或记录结构错误。
+    MISSING_COLUMN = "MISSING_COLUMN"  # 缺少必需输入列。
+    INVALID_CHANNELS = "INVALID_CHANNELS"  # RGB/YUV 通道组缺失或冲突。
+    INVALID_NUMERIC_VALUE = "INVALID_NUMERIC_VALUE"  # 通道值无法解析为数值。
+    NON_FINITE_VALUE = "NON_FINITE_VALUE"  # 输入数值为 NaN 或无穷值。
+    INVALID_TIMESTAMP = "INVALID_TIMESTAMP"  # 毫秒时间戳无效或未严格递增。
+    UNSUPPORTED_BLOCK_LAYOUT = "UNSUPPORTED_BLOCK_LAYOUT"  # 输入不是单块布局。
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"  # 样本不足或无法标准化。
+    INVALID_SAMPLING_RATE = "INVALID_SAMPLING_RATE"  # 采样率不满足滤波前提。
 
 
 class InferenceError(Exception):
@@ -11,6 +27,17 @@ class InferenceError(Exception):
         super().__init__(safe_message)
         self.code = code
         self.safe_message = safe_message
+
+
+class InputError(InferenceError):
+    """携带白名单输入原因并保留统一输入失败代码。"""
+
+    def __init__(self, reason: InputErrorReason) -> None:
+        """创建仅含受控原因的输入错误。"""
+        if type(reason) is not InputErrorReason:
+            raise TypeError("输入错误必须使用受控原因")
+        self.reason = reason
+        super().__init__("INFERENCE.INVALID_INPUT", "推理输入无效")
 
 
 class UnknownAlgorithmError(InferenceError):

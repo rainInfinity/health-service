@@ -10,7 +10,10 @@ from health_service.infrastructure.auth.tokens import issue_token_pair
 from health_service.models import ModelVersion, Profile, Task
 from health_service.schemas.responses.tasks import TaskInputFileResponse
 
-from tests.integration.workflows.test_inference_consumer import _PPG_CSV, _create_example_task
+from tests.integration.workflows.test_inference_consumer import (
+    _PPG_CSV,
+    _create_test_metric_task,
+)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -23,7 +26,7 @@ def test_business_routes_show_beijing_time_without_rewriting_payloads(tmp_path):
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"
     ):
-        task = _create_example_task()
+        task = _create_test_metric_task()
         Task.objects.filter(pk=task.pk).update(
             created_at=stamp,
             submitted_at=stamp,

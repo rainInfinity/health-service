@@ -19,10 +19,12 @@ from health_inference import (
     register_algorithm,
 )
 from health_service.application.catalog import (
+    create_metric_definition,
     create_model,
     create_model_version,
     publish_model_version,
     select_channel_model_version,
+    set_model_version_metrics,
     upload_model_artifact,
 )
 from health_service.infrastructure.inference_adapter import (
@@ -34,6 +36,8 @@ from health_service.infrastructure.storage import (
     StorageArea,
 )
 from health_service.models import Channel, Profile, Task, TaskInputFile
+
+from tests.integration.ppg_inputs import synthetic_ppg_csv
 
 
 def _accept_empty_parameters(params: Mapping[str, object]) -> None:
@@ -155,7 +159,7 @@ def _store_ppg(storage: LocalFileStorage, task: Task, csv_content: str) -> None:
     stored = storage.save_upload(
         BytesIO(csv_content.encode()),
         area=StorageArea.TASK_DATA,
-        max_bytes=4096,
+        max_bytes=1024 * 1024,
     )
     TaskInputFile.objects.create(
         task=task,
@@ -185,18 +189,39 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
                 name="Shared adapter",
                 description=None,
             )
+
+            for code, unit in (
+                ("hr", "beats_per_minute"),
+                ("br", "breaths_per_minute"),
+            ):
+                create_metric_definition(
+                    code=code,
+                    description=code,
+                    value_type="number",
+                    unit=unit,
+                )
             first_draft = create_model_version(
                 model_id=model.model_id,
                 version="1.0",
-                algorithm_key="hr_br.example",
+                algorithm_key="ppg.active.offline.hr_br.v1",
                 params=None,
+            )
+
+            set_model_version_metrics(
+                version_id=first_draft.version_id,
+                metric_codes=("hr", "br"),
             )
             first_version = publish_model_version(version_id=first_draft.version_id)
             second_draft = create_model_version(
                 model_id=model.model_id,
                 version="2.0",
-                algorithm_key="hr_br.example",
+                algorithm_key="ppg.active.offline.hr_br.v1",
                 params=None,
+            )
+
+            set_model_version_metrics(
+                version_id=second_draft.version_id,
+                metric_codes=("hr", "br"),
             )
             second_version = publish_model_version(version_id=second_draft.version_id)
             select_channel_model_version(
@@ -221,12 +246,12 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
             _store_ppg(
                 storage,
                 first_task,
-                "timestampFrame,avgR,avgG,avgB\n0,1,2,3\n500,1,2,3\n1000,1,2,3\n",
+                synthetic_ppg_csv(heart_rate_hz=1.2),
             )
             _store_ppg(
                 storage,
                 second_task,
-                "timestampFrame,avgR,avgG,avgB\n0,1,2,3\n250,1,2,3\n500,1,2,3\n750,1,2,3\n",
+                synthetic_ppg_csv(heart_rate_hz=1.5),
             )
             select_channel_model_version(
                 channel="ios-cn",
@@ -243,15 +268,41 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
                 execution_token=second_token,
             )
 
-            assert first_result is not None
-            assert second_result is not None
-            assert first_task.model_version_id == first_version.version_id
-            assert first_result.payload["sample_count"] == 3
-            assert second_result.payload["sample_count"] == 4
-            assert first_result.metrics["example.ppg.sample_count"] == 3
-            assert second_result.metrics["example.ppg.sample_count"] == 4
-            assert first_result.output_files == {}
-            assert second_result.output_files == {}
+            assert first_result.metrics["hr"] == pytest.approx(72.0, abs=0.2)
+            assert second_result.metrics["hr"] == pytest.approx(90.0, abs=0.2)
+            assert first_result.metrics["hr"] != second_result.metrics["hr"]
+            assert set(first_result.output_files) == {"processed_ppg", "processed_rsp"}
+            assert set(second_result.output_files) == {"processed_ppg", "processed_rsp"}
+            assert (
+                first_result.output_files["processed_ppg"]
+                != second_result.output_files["processed_ppg"]
+            )
+            first_ppg = storage.resolve_file(
+                StorageArea.TASK_DATA,
+                first_result.output_files["processed_ppg"],
+            )
+            first_rsp = storage.resolve_file(
+                StorageArea.TASK_DATA,
+                first_result.output_files["processed_rsp"],
+            )
+            second_ppg = storage.resolve_file(
+                StorageArea.TASK_DATA,
+                second_result.output_files["processed_ppg"],
+            )
+            second_rsp = storage.resolve_file(
+                StorageArea.TASK_DATA,
+                second_result.output_files["processed_rsp"],
+            )
+            assert (first_ppg.name, first_rsp.name, second_ppg.name, second_rsp.name) == (
+                "ppg-processed.csv",
+                "rsp-processed.csv",
+                "ppg-processed.csv",
+                "rsp-processed.csv",
+            )
+            with first_ppg.open(encoding="utf-8") as output:
+                assert output.readline().rstrip("\r\n") == "timestamp,ppg"
+            with first_rsp.open(encoding="utf-8") as output:
+                assert output.readline().rstrip("\r\n") == "timestamp,rsp"
             assert (
                 storage.task_data_root / "outputs" / str(first_task.pk) / first_token.hex
             ).is_dir()

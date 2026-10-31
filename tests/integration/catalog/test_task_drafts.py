@@ -18,14 +18,16 @@ from health_service.application.task_exceptions import (
 from health_service.application.tasks import create_task_draft, list_user_tasks, read_user_task
 from health_service.models import Channel, Task
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
 
-def _create_selected_example(*, channel: str = "ios-cn", code: str = "pulse"):
-    """创建并为普通渠道选择可执行的示例模型版本。"""
+
+def _create_selected_test_algorithm(*, channel: str = "ios-cn", code: str = "pulse"):
+    """创建并为普通渠道选择可执行的测试算法版本。"""
     model = create_model(code=code, name="Pulse", description=None)
     version = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     published = publish_model_version(version_id=version.version_id)
@@ -53,7 +55,7 @@ def test_draft_requires_channel_selection_and_fixes_current_published_version():
         )
     assert not Task.objects.exists()
 
-    selected_model, version = _create_selected_example()
+    selected_model, version = _create_selected_test_algorithm()
     task = create_task_draft(
         user_id=user.pk,
         channel="ios-cn",
@@ -64,7 +66,7 @@ def test_draft_requires_channel_selection_and_fixes_current_published_version():
         selected_model.model_id,
         version.version_id,
         Task.StatusChoices.DRAFT,
-        True,
+        False,
     )
     assert record.model_version_id == version.version_id
     assert record.submitted_at is None
@@ -78,7 +80,7 @@ def test_task_list_uses_stable_bounded_order_without_loading_large_payloads():
         username="task-page-owner",
         password="Willow-lake-347!strong",
     )
-    model, _ = _create_selected_example()
+    model, _ = _create_selected_test_algorithm()
     tasks = tuple(
         create_task_draft(
             user_id=user.pk,
@@ -108,7 +110,7 @@ def test_task_list_uses_stable_bounded_order_without_loading_large_payloads():
     assert tuple(item.task_id for item in page) == tuple(
         sorted((task.task_id for task in tasks), reverse=True)[:2]
     )
-    assert all(item.is_example for item in page)
+    assert all(item.is_example is False for item in page)
 
     with pytest.raises(InvalidTaskPagination):
         list_user_tasks(user_id=user.pk, channel="ios-cn", offset=-1, limit=20)
@@ -127,7 +129,7 @@ def test_task_detail_requires_matching_owner_and_source_channel():
         username="task-detail-other",
         password="Birch-ridge-748!strong",
     )
-    model, _ = _create_selected_example()
+    model, _ = _create_selected_test_algorithm()
     task = create_task_draft(
         user_id=owner.pk,
         channel="ios-cn",
@@ -155,7 +157,7 @@ def test_task_detail_projects_success_result_and_only_safe_failure_summary():
         username="task-detail-results",
         password="Birch-ridge-848!strong",
     )
-    _model, version = _create_selected_example(code="task-results")
+    _model, version = _create_selected_test_algorithm(code="task-results")
     channel = Channel.objects.get(label="ios-cn")
     finished_at = timezone.now()
     success = Task.objects.create(
@@ -163,7 +165,7 @@ def test_task_detail_projects_success_result_and_only_safe_failure_summary():
         channel=channel,
         model_version_id=version.version_id,
         status=Task.StatusChoices.SUCCEEDED,
-        result_payload={"diagnostics": {"sample_count": 8}},
+        result_payload={"completed": True},
         finished_at=finished_at,
     )
     failed = Task.objects.create(
@@ -187,7 +189,7 @@ def test_task_detail_projects_success_result_and_only_safe_failure_summary():
         user_id=user.pk,
         channel="ios-cn",
     )
-    assert successful_detail.result_payload == {"diagnostics": {"sample_count": 8}}
+    assert successful_detail.result_payload == {"completed": True}
     assert successful_detail.failure_code is None
     assert failed_detail.result_payload is None
     assert failed_detail.failure_code == "INFERENCE.INVALID_INPUT"

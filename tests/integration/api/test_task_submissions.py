@@ -22,6 +22,8 @@ from health_service.application.tasks import create_task_draft
 from health_service.infrastructure.persistence import tasks as task_persistence
 from health_service.models import Task, TaskMetric
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 async def _login(client: AsyncClient, username: str, password: str):
     """通过真实普通渠道登录接口取得 Access。"""
@@ -77,7 +79,7 @@ def test_submit_route_requires_uploaded_input_and_hides_profile_snapshot(tmp_pat
     version_draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=version_draft.version_id)
@@ -205,7 +207,7 @@ def test_submit_accepts_optional_client_metadata_without_exposing_it(
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)
@@ -401,7 +403,7 @@ def test_success_detail_returns_authoritative_result_without_snapshot_or_metric_
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     version = publish_model_version(version_id=draft.version_id)
@@ -422,7 +424,7 @@ def test_success_detail_returns_authoritative_result_without_snapshot_or_metric_
         unit="samples",
     )
     stored_result = {
-        "diagnostics": {"sample_count": 4, "duration_seconds": 1.25},
+        "completed": True,
         "execution_marker": "persisted-result",
     }
     submitted_at = timezone.now()
@@ -460,7 +462,7 @@ def test_success_detail_returns_authoritative_result_without_snapshot_or_metric_
     data = response.json()["data"]
     assert response.status_code == 200
     assert data["status"] == Task.StatusChoices.SUCCEEDED
-    assert data["isExample"] is True
+    assert data["isExample"] is False
     assert data["result"] == stored_result
     assert "metrics" not in data
     response_text = json.dumps(data, ensure_ascii=False)

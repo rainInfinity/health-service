@@ -14,13 +14,15 @@ from health_service.application.catalog_exceptions import (
 )
 from health_service.models import Channel, ChannelModelSelection, Task
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 def _published_version(*, model_id: int, version: str):
-    """创建并发布零制品示例版本。"""
+    """创建并发布零制品测试算法版本。"""
     draft = create_model_version(
         model_id=model_id,
         version=version,
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     return publish_model_version(version_id=draft.version_id)
@@ -113,7 +115,7 @@ def test_selection_rejects_unknown_channel_unpublished_or_foreign_version():
     unpublished = create_model_version(
         model_id=first_model.model_id,
         version="2.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
     foreign = _published_version(model_id=second_model.model_id, version="1.0")

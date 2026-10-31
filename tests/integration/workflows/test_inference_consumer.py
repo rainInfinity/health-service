@@ -1,10 +1,12 @@
 """通过真实 Redis Stream 验证独立推理消费者的确认与恢复语义。"""
 
 import asyncio
+import csv
 import json
+import math
 import signal
 from datetime import datetime, timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from time import sleep
 from uuid import uuid4
@@ -27,6 +29,7 @@ from health_inference import (
     QualityRejection,
     QualityRejectionReason,
 )
+from health_inference.exceptions import InputError, InputErrorReason
 from health_inference.registry import _ALGORITHMS
 from health_service.application.catalog import (
     create_metric_definition,
@@ -35,6 +38,12 @@ from health_service.application.catalog import (
     publish_model_version,
     select_channel_model_version,
     set_model_version_metrics,
+)
+from health_service.application.execution import record_task_execution_failure
+from health_service.application.tasks import (
+    create_task_draft,
+    submit_user_task,
+    upload_task_input,
 )
 from health_service.infrastructure.inference_adapter import clear_version_runtime_cache
 from health_service.infrastructure.inference_adapter import (
@@ -45,14 +54,15 @@ from health_service.management.commands import run_inference as inference_comman
 from health_service.models import Channel, Task, TaskInputFile, TaskMetric
 from redis import Redis
 
+from tests.integration.algorithm_fixtures import (
+    TEST_METRIC_ALGORITHM_KEY,
+    TEST_METRIC_CODE,
+)
+from tests.integration.ppg_inputs import synthetic_ppg_csv
 from tests.log_records import parse_console_records
 
 _PPG_CSV = "timestampFrame,avgR,avgG,avgB\n0,1,2,3\n500,2,3,4\n1000,3,4,5\n1500,4,5,6\n"
-_EXAMPLE_METRICS = (
-    ("example.ppg.sample_count", "samples"),
-    ("example.ppg.duration_seconds", "seconds"),
-    ("example.ppg.sampling_rate_hz", "hertz"),
-)
+_TEST_METRICS = ((TEST_METRIC_CODE, "count"),)
 
 
 @pytest.fixture
@@ -69,24 +79,24 @@ def inference_stream():
         client.close()
 
 
-def _create_example_task(*, last_dispatched_at: datetime | None = None) -> Task:
-    """创建带示例 PPG 文件和完整投影配置的待执行任务。"""
+def _create_test_metric_task(*, last_dispatched_at: datetime | None = None) -> Task:
+    """创建带 PPG 输入和测试指标投影的待执行任务。"""
     user = get_user_model().objects.create_user(
         username=f"consumer-{uuid4().hex}",
         password="Dawn-valley-483!strong",
     )
     model = create_model(
         code=f"consumer-{uuid4().hex}",
-        name="Consumer example",
+        name="Consumer test task",
         description=None,
     )
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_METRIC_ALGORITHM_KEY,
         params=None,
     )
-    for code, unit in _EXAMPLE_METRICS:
+    for code, unit in _TEST_METRICS:
         create_metric_definition(
             code=code,
             description=code,
@@ -95,7 +105,7 @@ def _create_example_task(*, last_dispatched_at: datetime | None = None) -> Task:
         )
     set_model_version_metrics(
         version_id=draft.version_id,
-        metric_codes=tuple(code for code, _ in _EXAMPLE_METRICS),
+        metric_codes=tuple(code for code, _ in _TEST_METRICS),
     )
     version = publish_model_version(version_id=draft.version_id)
     select_channel_model_version(
@@ -117,16 +127,21 @@ def _create_example_task(*, last_dispatched_at: datetime | None = None) -> Task:
     return task
 
 
-def _store_ppg_input(task: Task, *, uploaded_at: datetime) -> None:
-    """为给定任务写入独立选中的示例 PPG 输入文件。"""
+def _store_ppg_input(
+    task: Task,
+    *,
+    uploaded_at: datetime,
+    content: str = _PPG_CSV,
+) -> None:
+    """为给定任务写入独立选中的 PPG CSV 输入文件。"""
     storage = LocalFileStorage(
         Path(settings.TASK_DATA_ROOT),
         Path(settings.MODEL_ARTIFACT_ROOT),
     )
     stored = storage.save_upload(
-        BytesIO(_PPG_CSV.encode("utf-8")),
+        BytesIO(content.encode("utf-8")),
         area=StorageArea.TASK_DATA,
-        max_bytes=4096,
+        max_bytes=1024 * 1024,
     )
     TaskInputFile.objects.create(
         task=task,
@@ -138,8 +153,8 @@ def _store_ppg_input(task: Task, *, uploaded_at: datetime) -> None:
     )
 
 
-def _create_example_task_for_version(version_id: int) -> Task:
-    """为已发布示例版本创建第二个独立待执行任务。"""
+def _create_metric_task_for_version(version_id: int) -> Task:
+    """为已发布测试版本创建第二个独立待执行任务。"""
     user = get_user_model().objects.create_user(
         username=f"consumer-{uuid4().hex}",
         password="Dawn-valley-483!strong",
@@ -234,26 +249,24 @@ def _run_once(consumer: str = "test-consumer") -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_once_dispatches_and_executes_example_task(tmp_path, inference_stream, capsys):
-    """单轮命令补发并完成示例任务，原子保存完整结果和所选指标。"""
+def test_once_dispatches_and_executes_test_algorithm_task(
+    tmp_path,
+    inference_stream,
+    capsys,
+):
+    """单轮命令补发并完成测试算法任务，保存结果和投影指标。"""
     client, stream, group = inference_stream
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_example_task()
+        task = _create_test_metric_task()
         _run_once()
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.SUCCEEDED
-    assert task.result_payload == {
-        "example": True,
-        "sample_count": 4,
-        "duration_seconds": 1.5,
-        "sampling_rate_hz": 2.0,
-    }
-    assert all(key not in task.result_payload for key in ("hr", "br"))
-    assert TaskMetric.objects.filter(task=task).count() == 3
+    assert task.result_payload == {"completed": True}
+    assert TaskMetric.objects.filter(task=task).count() == 1
     assert client.xpending(stream, group)["pending"] == 0
     records = parse_console_records(capsys.readouterr().out)
     assert [record["event"] for record in records] == [
@@ -285,12 +298,7 @@ def test_registered_client_metadata_tasks_execute_end_to_end(
         "brand": "Example",
         "custom": {"appBuild": 42},
     }
-    expected_result = {
-        "example": True,
-        "sample_count": 4,
-        "duration_seconds": 1.5,
-        "sampling_rate_hz": 2.0,
-    }
+    expected_result = {"completed": True}
 
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
@@ -304,10 +312,10 @@ def test_registered_client_metadata_tasks_execute_end_to_end(
         draft = create_model_version(
             model_id=model.model_id,
             version="1.0",
-            algorithm_key="hr_br.example",
+            algorithm_key=TEST_METRIC_ALGORITHM_KEY,
             params=None,
         )
-        for code, unit in _EXAMPLE_METRICS:
+        for code, unit in _TEST_METRICS:
             create_metric_definition(
                 code=code,
                 description=code,
@@ -316,7 +324,7 @@ def test_registered_client_metadata_tasks_execute_end_to_end(
             )
         set_model_version_metrics(
             version_id=draft.version_id,
-            metric_codes=tuple(code for code, _ in _EXAMPLE_METRICS),
+            metric_codes=tuple(code for code, _ in _TEST_METRICS),
         )
         version = publish_model_version(version_id=draft.version_id)
         select_channel_model_version(
@@ -605,6 +613,11 @@ def test_quality_rejection_runs_through_http_and_terminal_replay(
     assert first_data["failureCode"] == "INFERENCE.QUALITY_REJECTED"
     assert first_data["result"] is None
     assert first_data["qualityFailure"] == expected_quality
+    assert first_data["failureMessage"] == (
+        "信号质量评分未达到要求，请重新采集"
+        if rejection.reason is QualityRejectionReason.LOW_SCORE
+        else "未检测到可用信号，请重新采集"
+    )
     assert not {"failureDetail", "profileSnapshot"}.intersection(first_data)
 
 
@@ -785,7 +798,7 @@ def test_once_acknowledges_terminal_malformed_and_missing_task_messages(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_example_task()
+        task = _create_test_metric_task()
         saved_result = {"stable": "existing-result"}
         Task.objects.filter(pk=task.pk).update(
             status=Task.StatusChoices.SUCCEEDED,
@@ -819,7 +832,7 @@ def test_once_leaves_message_pending_while_database_lease_is_active(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_example_task(last_dispatched_at=timezone.now())
+        task = _create_test_metric_task(last_dispatched_at=timezone.now())
         execution_token = uuid4()
         Task.objects.filter(pk=task.pk).update(
             status=Task.StatusChoices.RUNNING,
@@ -849,7 +862,7 @@ def test_once_reclaims_idle_pending_message_with_xautoclaim(tmp_path, inference_
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_example_task(last_dispatched_at=timezone.now())
+        task = _create_test_metric_task(last_dispatched_at=timezone.now())
         client.xgroup_create(stream, group, id="0-0", mkstream=True)
         message_id = client.xadd(stream, {"task_id": str(task.pk)})
         client.xreadgroup(
@@ -871,7 +884,7 @@ def test_once_reclaims_idle_pending_message_with_xautoclaim(tmp_path, inference_
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.SUCCEEDED
-    assert task.result_payload["sample_count"] == 4
+    assert task.result_payload == {"completed": True}
     assert client.xpending(stream, group)["pending"] == 0
 
 
@@ -885,10 +898,10 @@ def test_heartbeat_keeps_long_inference_lease_valid(tmp_path, inference_stream, 
         INFERENCE_LEASE_SECONDS=0.15,
         INFERENCE_HEARTBEAT_SECONDS=0.03,
     ):
-        task = _create_example_task()
+        task = _create_test_metric_task()
 
         def slow_inference(*, task_id, execution_token):
-            """延迟后执行真实示例算法以跨越初始租约。"""
+            """延迟后执行测试算法以跨越初始租约。"""
             sleep(0.45)
             return run_actual_task_inference(
                 task_id=task_id,
@@ -918,7 +931,7 @@ def test_heartbeat_failure_never_writes_terminal_state_or_ack(
         INFERENCE_LEASE_SECONDS=0.3,
         INFERENCE_HEARTBEAT_SECONDS=0.03,
     ):
-        task = _create_example_task()
+        task = _create_test_metric_task()
 
         def slow_inference(*, task_id, execution_token):
             """等待心跳线程完成失败判定后返回真实算法结果。"""
@@ -973,11 +986,11 @@ def test_shutdown_signal_finishes_current_task_and_stops_batch(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        first_task = _create_example_task()
-        second_task = _create_example_task_for_version(first_task.model_version_id)
+        first_task = _create_test_metric_task()
+        second_task = _create_metric_task_for_version(first_task.model_version_id)
 
         def stop_after_start(*, task_id, execution_token):
-            """触发 SIGTERM 后继续完成已经开始的真实示例算法。"""
+            """触发 SIGTERM 后继续完成已经开始的测试算法。"""
             signal.raise_signal(signal.SIGTERM)
             return run_actual_task_inference(
                 task_id=task_id,
@@ -1001,14 +1014,7 @@ def test_invalid_input_logs_only_committed_safe_failure(tmp_path, inference_stre
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"
     ):
-        task = _create_example_task()
-        input_file = TaskInputFile.objects.get(task=task)
-        storage = LocalFileStorage(
-            Path(settings.TASK_DATA_ROOT), Path(settings.MODEL_ARTIFACT_ROOT)
-        )
-        storage.resolve_file(StorageArea.TASK_DATA, input_file.storage_key).write_text(
-            "HEALTH-INPUT-SENTINEL"
-        )
+        task, _username = _create_ppg_v1_input_failure_task("HEALTH-INPUT-SENTINEL")
         _run_once()
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
@@ -1054,7 +1060,7 @@ def test_result_logs_do_not_cross_persistence_and_ack_boundaries(
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks", MODEL_ARTIFACT_ROOT=tmp_path / "models"
     ):
-        task = _create_example_task()
+        task = _create_test_metric_task()
         if boundary == "ack-error":
             monkeypatch.setattr(Redis, "xack", interrupted_ack)
         else:
@@ -1083,3 +1089,643 @@ def test_result_logs_do_not_cross_persistence_and_ack_boundaries(
         assert error["taskId"] == str(task.pk)
         assert "inference.worker.stopped" not in events
     assert "PRIVATE-" not in str(records)
+
+
+def _create_ppg_v1_input_failure_task(content: str) -> tuple[Task, str]:
+    """创建已发布正式 v1 和带指定 PPG 文件的待执行任务。"""
+    username = f"consumer-ppg-v1-{uuid4().hex}"
+    user = get_user_model().objects.create_user(
+        username=username,
+        password="Dawn-valley-483!strong",
+    )
+    model = create_model(
+        code=f"consumer-ppg-v1-{uuid4().hex}",
+        name="PPG HR/BR v1",
+        description=None,
+    )
+    draft = create_model_version(
+        model_id=model.model_id,
+        version="1.0",
+        algorithm_key="ppg.active.offline.hr_br.v1",
+        params=None,
+    )
+    definitions = (
+        ("hr", "beats_per_minute"),
+        ("br", "breaths_per_minute"),
+    )
+    for code, unit in definitions:
+        create_metric_definition(
+            code=code,
+            description=code,
+            value_type="number",
+            unit=unit,
+        )
+    set_model_version_metrics(
+        version_id=draft.version_id,
+        metric_codes=tuple(code for code, _ in definitions),
+    )
+    version = publish_model_version(version_id=draft.version_id)
+    select_channel_model_version(
+        channel="ios-cn",
+        model_id=model.model_id,
+        version_id=version.version_id,
+    )
+    now = timezone.now()
+    task = Task.objects.create(
+        user=user,
+        channel=Channel.objects.get(label="ios-cn"),
+        model_version_id=version.version_id,
+        status=Task.StatusChoices.SUBMITTED,
+        profile_snapshot={},
+        submitted_at=now,
+    )
+    _store_ppg_input(task, uploaded_at=now, content=content)
+    return task, username
+
+
+@pytest.mark.django_db(transaction=True)
+def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
+    tmp_path,
+    inference_stream,
+):
+    """经管理与任务 HTTP API 发布、提交、执行并下载正式 v1 结果。"""
+    redis_client, stream, group = inference_stream
+    password = "Dawn-valley-483!strong"
+    user_model = get_user_model()
+    manager = user_model.objects.create_user(
+        username=f"consumer-manager-{uuid4().hex}",
+        password=password,
+        is_staff=True,
+        is_superuser=False,
+    )
+    owner = user_model.objects.create_user(
+        username=f"consumer-owner-{uuid4().hex}",
+        password=password,
+    )
+    other_user = user_model.objects.create_user(
+        username=f"consumer-other-{uuid4().hex}",
+        password=password,
+    )
+
+    async def prepare_task():
+        """通过实际 HTTP 接口创建正式版本并上传、提交单块输入。"""
+        client = AsyncClient()
+        manager_login = await client.post(
+            "/api/v1/manager/auth/login",
+            data=json.dumps({"username": manager.username, "password": password}),
+            content_type="application/json",
+        )
+        assert manager_login.status_code == 200
+        manager_headers = {
+            "Authorization": (f"Bearer {manager_login.json()['data']['accessToken']}")
+        }
+        model_response = await client.post(
+            "/api/v1/manager/models",
+            data=json.dumps({"code": f"ppg-v1-{uuid4().hex}", "name": "PPG HR/BR v1"}),
+            content_type="application/json",
+            headers=manager_headers,
+        )
+        assert model_response.status_code == 201
+        model_id = model_response.json()["data"]["modelId"]
+        version_response = await client.post(
+            f"/api/v1/manager/models/{model_id}/versions",
+            data=json.dumps(
+                {
+                    "version": "1.0",
+                    "algorithmKey": "ppg.active.offline.hr_br.v1",
+                    "params": None,
+                }
+            ),
+            content_type="application/json",
+            headers=manager_headers,
+        )
+        assert version_response.status_code == 201
+        version_id = version_response.json()["data"]["versionId"]
+        metric_responses = []
+        for code, unit in (
+            ("hr", "beats_per_minute"),
+            ("br", "breaths_per_minute"),
+        ):
+            metric_responses.append(
+                await client.post(
+                    "/api/v1/manager/metrics",
+                    data=json.dumps(
+                        {
+                            "code": code,
+                            "description": code,
+                            "valueType": "number",
+                            "unit": unit,
+                        }
+                    ),
+                    content_type="application/json",
+                    headers=manager_headers,
+                )
+            )
+        metrics_response = await client.put(
+            f"/api/v1/manager/model-versions/{version_id}/metrics",
+            data=json.dumps({"metricCodes": ["hr", "br"]}),
+            content_type="application/json",
+            headers=manager_headers,
+        )
+        publish_response = await client.post(
+            f"/api/v1/manager/model-versions/{version_id}/publish",
+            headers=manager_headers,
+        )
+        selection_response = await client.put(
+            f"/api/v1/manager/channels/ios-cn/models/{model_id}/selection",
+            data=json.dumps({"versionId": version_id}),
+            content_type="application/json",
+            headers=manager_headers,
+        )
+        assert all(response.status_code == 201 for response in metric_responses)
+        assert metrics_response.status_code == 200
+        assert publish_response.status_code == 200
+        assert publish_response.json()["data"]["publishedAt"] is not None
+        assert selection_response.status_code == 200
+
+        owner_login = await client.post(
+            "/api/v1/ios-cn/auth/login",
+            data=json.dumps({"username": owner.username, "password": password}),
+            content_type="application/json",
+        )
+        assert owner_login.status_code == 200
+        owner_headers = {"Authorization": f"Bearer {owner_login.json()['data']['accessToken']}"}
+        created = await client.post(
+            "/api/v1/ios-cn/tasks",
+            data=json.dumps({"modelId": model_id}),
+            content_type="application/json",
+            headers=owner_headers,
+        )
+        assert created.status_code == 201
+        created_data = created.json()["data"]
+        task_id = created_data["taskId"]
+        uploaded = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/files",
+            data={
+                "logicalName": "ppg",
+                "file": SimpleUploadedFile(
+                    "synthetic-ppg.csv",
+                    synthetic_ppg_csv(heart_rate_hz=1.2).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+            },
+            headers=owner_headers,
+        )
+        submitted = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/submit",
+            data=json.dumps({}),
+            content_type="application/json",
+            headers=owner_headers,
+        )
+        await sync_to_async(connections.close_all, thread_sensitive=True)()
+        return (
+            model_id,
+            version_id,
+            task_id,
+            owner_headers,
+            created_data,
+            uploaded,
+            submitted,
+        )
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        MAX_UPLOAD_BYTES=1024 * 1024,
+    ):
+        (
+            model_id,
+            version_id,
+            task_id,
+            owner_headers,
+            created_data,
+            uploaded,
+            submitted,
+        ) = asyncio.run(prepare_task())
+        assert created_data["versionId"] == version_id
+        assert created_data["isExample"] is False
+        assert uploaded.status_code == 201
+        upload_data = uploaded.json()["data"]
+        assert upload_data["logicalName"] == "ppg"
+        assert upload_data["isSelected"] is True
+        assert submitted.status_code == 200
+        assert submitted.json()["data"]["status"] == "SUBMITTED"
+        _run_once("ppg-v1-http")
+
+        async def query_and_download():
+            """用任务所有者令牌读取详情及两个真实流式输出。"""
+            client = AsyncClient()
+            detail = await client.get(
+                f"/api/v1/ios-cn/tasks/{task_id}",
+                headers=owner_headers,
+            )
+            ppg_response = await client.get(
+                f"/api/v1/ios-cn/tasks/{task_id}/outputs/processed_ppg/download",
+                headers=owner_headers,
+            )
+            rsp_response = await client.get(
+                f"/api/v1/ios-cn/tasks/{task_id}/outputs/processed_rsp/download",
+                headers=owner_headers,
+            )
+            other_login = await client.post(
+                "/api/v1/ios-cn/auth/login",
+                data=json.dumps({"username": other_user.username, "password": password}),
+                content_type="application/json",
+            )
+            wrong_channel_login = await client.post(
+                "/api/v1/wxapp/auth/login",
+                data=json.dumps({"username": owner.username, "password": password}),
+                content_type="application/json",
+            )
+            other_headers = {
+                "Authorization": (f"Bearer {other_login.json()['data']['accessToken']}")
+            }
+            wrong_channel_headers = {
+                "Authorization": (f"Bearer {wrong_channel_login.json()['data']['accessToken']}")
+            }
+            unauthorized_responses = (
+                await client.get(
+                    f"/api/v1/ios-cn/tasks/{task_id}/outputs/processed_ppg/download",
+                    headers=other_headers,
+                ),
+                await client.get(
+                    f"/api/v1/ios-cn/tasks/{task_id}/outputs/processed_rsp/download",
+                    headers=other_headers,
+                ),
+                await client.get(
+                    f"/api/v1/wxapp/tasks/{task_id}/outputs/processed_ppg/download",
+                    headers=wrong_channel_headers,
+                ),
+                await client.get(
+                    f"/api/v1/wxapp/tasks/{task_id}/outputs/processed_rsp/download",
+                    headers=wrong_channel_headers,
+                ),
+            )
+
+            assert other_login.status_code == wrong_channel_login.status_code == 200
+
+            async def read_body(response):
+                """读取普通或流式 HTTP 响应字节。"""
+                if not response.streaming:
+                    return response.content
+                content = response.streaming_content
+                if hasattr(content, "__aiter__"):
+                    return b"".join([chunk async for chunk in content])
+                return b"".join(content)
+
+            bodies = (
+                await read_body(ppg_response),
+                await read_body(rsp_response),
+            )
+            await sync_to_async(connections.close_all, thread_sensitive=True)()
+            return (
+                detail,
+                ppg_response.status_code,
+                rsp_response.status_code,
+                bodies,
+                tuple(response.status_code for response in unauthorized_responses),
+            )
+
+        detail, ppg_status, rsp_status, output_bodies, unauthorized_statuses = asyncio.run(
+            query_and_download()
+        )
+
+    task = Task.objects.get(pk=task_id)
+    assert task.status == Task.StatusChoices.SUCCEEDED
+    assert task.model_version_id == version_id
+    assert task.result_payload["hr"] == pytest.approx(72.0, abs=0.2)
+    assert math.isfinite(task.result_payload["br"])
+    assert task.result_payload["quality"]["score"] >= 70.0
+    assert task.result_payload["quality"]["threshold"] == 70
+    assert detail.status_code == 200
+    detail_data = detail.json()["data"]
+    assert detail_data["modelId"] == model_id
+    assert detail_data["versionId"] == version_id
+    assert detail_data["isExample"] is False
+    assert detail_data["status"] == "SUCCEEDED"
+    result = detail_data["result"]
+    assert result["hr"] == task.result_payload["hr"]
+    assert result["br"] == task.result_payload["br"]
+    assert result["quality"] == task.result_payload["quality"]
+    assert set(result["output_files"]) == {"processed_ppg", "processed_rsp"}
+    assert str(tmp_path) not in json.dumps(result)
+
+    projected_metrics = {
+        item.metric.code: item.numeric_value
+        for item in TaskMetric.objects.filter(task=task).select_related("metric")
+    }
+    assert projected_metrics == {
+        "hr": result["hr"],
+        "br": result["br"],
+    }
+    assert (ppg_status, rsp_status) == (200, 200)
+    assert unauthorized_statuses == (404, 404, 404, 404)
+    ppg_rows = list(csv.DictReader(StringIO(output_bodies[0].decode("utf-8"))))
+    rsp_rows = list(csv.DictReader(StringIO(output_bodies[1].decode("utf-8"))))
+    assert len(ppg_rows) == len(rsp_rows) == 1800
+    assert list(ppg_rows[0]) == ["timestamp", "ppg"]
+    assert list(rsp_rows[0]) == ["timestamp", "rsp"]
+    expected_timestamps = [index * 1000.0 / 30.0 for index in range(1800)]
+    for ppg_row, rsp_row, timestamp in zip(
+        ppg_rows,
+        rsp_rows,
+        expected_timestamps,
+        strict=True,
+    ):
+        assert float(ppg_row["timestamp"]) == pytest.approx(timestamp)
+        assert float(rsp_row["timestamp"]) == pytest.approx(timestamp)
+        assert math.isfinite(float(ppg_row["ppg"]))
+        assert math.isfinite(float(rsp_row["rsp"]))
+    assert redis_client.xpending(stream, group)["pending"] == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_official_ppg_v1_keeps_fixed_versions_and_metric_projections_isolated(
+    tmp_path,
+    inference_stream,
+):
+    """正式版本发布、选择及执行后各自保持输入、身份和指标投影。"""
+    redis_client, stream, group = inference_stream
+    user = get_user_model().objects.create_user(
+        username=f"consumer-ppg-version-{uuid4().hex}",
+        password="Dawn-valley-483!strong",
+    )
+    model = create_model(
+        code=f"consumer-ppg-version-{uuid4().hex}",
+        name="PPG HR/BR version isolation",
+        description=None,
+    )
+    metric_definitions = (
+        ("hr", "beats_per_minute"),
+        ("br", "breaths_per_minute"),
+    )
+    for code, unit in metric_definitions:
+        create_metric_definition(
+            code=code,
+            description=code,
+            value_type="number",
+            unit=unit,
+        )
+
+    versions = {}
+    for version_name, metric_code in (("1.0", "hr"), ("2.0", "br")):
+        draft = create_model_version(
+            model_id=model.model_id,
+            version=version_name,
+            algorithm_key="ppg.active.offline.hr_br.v1",
+            params=None,
+        )
+        set_model_version_metrics(
+            version_id=draft.version_id,
+            metric_codes=(metric_code,),
+        )
+        versions[version_name] = publish_model_version(version_id=draft.version_id)
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        MAX_UPLOAD_BYTES=1024 * 1024,
+    ):
+        select_channel_model_version(
+            channel="ios-cn",
+            model_id=model.model_id,
+            version_id=versions["1.0"].version_id,
+        )
+        first_draft = create_task_draft(
+            user_id=user.pk,
+            channel="ios-cn",
+            model_id=model.model_id,
+        )
+        upload_task_input(
+            task_id=first_draft.task_id,
+            user_id=user.pk,
+            channel="ios-cn",
+            logical_name="ppg",
+            source=SimpleUploadedFile(
+                "first.csv",
+                synthetic_ppg_csv(heart_rate_hz=1.2).encode("utf-8"),
+                content_type="text/csv",
+            ),
+        )
+        first_submission = submit_user_task(
+            task_id=first_draft.task_id,
+            user_id=user.pk,
+            channel="ios-cn",
+        )
+
+        select_channel_model_version(
+            channel="ios-cn",
+            model_id=model.model_id,
+            version_id=versions["2.0"].version_id,
+        )
+        second_draft = create_task_draft(
+            user_id=user.pk,
+            channel="ios-cn",
+            model_id=model.model_id,
+        )
+        upload_task_input(
+            task_id=second_draft.task_id,
+            user_id=user.pk,
+            channel="ios-cn",
+            logical_name="ppg",
+            source=SimpleUploadedFile(
+                "second.csv",
+                synthetic_ppg_csv(heart_rate_hz=1.5).encode("utf-8"),
+                content_type="text/csv",
+            ),
+        )
+        second_submission = submit_user_task(
+            task_id=second_draft.task_id,
+            user_id=user.pk,
+            channel="ios-cn",
+        )
+        assert first_submission.status == second_submission.status == "SUBMITTED"
+        _run_once("ppg-version-isolation")
+
+    first_task = Task.objects.get(pk=first_draft.task_id)
+    second_task = Task.objects.get(pk=second_draft.task_id)
+    assert first_task.status == second_task.status == Task.StatusChoices.SUCCEEDED
+    assert first_task.model_version_id == versions["1.0"].version_id
+    assert second_task.model_version_id == versions["2.0"].version_id
+    assert first_task.result_payload["hr"] == pytest.approx(72.0, abs=0.2)
+    assert second_task.result_payload["hr"] == pytest.approx(90.0, abs=0.2)
+    for task in (first_task, second_task):
+        assert math.isfinite(task.result_payload["br"])
+        assert task.result_payload["quality"]["score"] >= 70.0
+        assert task.result_payload["quality"]["threshold"] == 70
+
+    first_metrics = {
+        item.metric.code: item.numeric_value
+        for item in TaskMetric.objects.filter(task=first_task).select_related("metric")
+    }
+    second_metrics = {
+        item.metric.code: item.numeric_value
+        for item in TaskMetric.objects.filter(task=second_task).select_related("metric")
+    }
+    assert first_metrics == {"hr": pytest.approx(72.0, abs=0.2)}
+    assert second_metrics == {"br": second_task.result_payload["br"]}
+    assert redis_client.xpending(stream, group)["pending"] == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_formal_ppg_quality_rejection_has_no_output_or_metrics(
+    tmp_path,
+    inference_stream,
+):
+    """真实 HR/BR v1 质量拒绝不写成功结果、指标或处理文件。"""
+    redis_client, stream, group = inference_stream
+    content = synthetic_ppg_csv(heart_rate_hz=1.2, noise_amplitude=30.0)
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        task, username = _create_ppg_v1_input_failure_task(content)
+        _run_once("ppg-quality-rejection")
+        task.refresh_from_db()
+
+        assert task.status == Task.StatusChoices.FAILED
+        assert task.failure_code == "INFERENCE.QUALITY_REJECTED"
+        assert task.failure_message == "信号质量评分未达到要求，请重新采集"
+        assert task.failure_detail["quality"]["reason"] == "LOW_SCORE"
+        score = task.failure_detail["quality"]["details"]["score"]
+        assert score < 70.0
+        assert task.failure_detail["quality"]["details"]["threshold"] == 70
+        assert task.result_payload is None
+        assert not TaskMetric.objects.filter(task=task).exists()
+        output_root = tmp_path / "tasks" / "outputs" / str(task.pk)
+        assert not tuple(path for path in output_root.rglob("*") if path.is_file())
+
+        async def query_failure():
+            """通过本人详情接口核对受控质量拒绝文案和明细。"""
+            client = AsyncClient()
+            login = await client.post(
+                "/api/v1/ios-cn/auth/login",
+                data=json.dumps(
+                    {
+                        "username": username,
+                        "password": "Dawn-valley-483!strong",
+                    }
+                ),
+                content_type="application/json",
+            )
+            headers = {"Authorization": f"Bearer {login.json()['data']['accessToken']}"}
+            detail = await client.get(
+                f"/api/v1/ios-cn/tasks/{task.pk}",
+                headers=headers,
+            )
+            output_download = await client.get(
+                f"/api/v1/ios-cn/tasks/{task.pk}/outputs/processed_ppg/download",
+                headers=headers,
+            )
+            await sync_to_async(connections.close_all, thread_sensitive=True)()
+            return login, detail, output_download
+
+        login, detail, output_download = asyncio.run(query_failure())
+
+    assert login.status_code == 200
+    assert detail.status_code == 200
+    detail_data = detail.json()["data"]
+    assert detail_data["status"] == Task.StatusChoices.FAILED
+    assert detail_data["failureCode"] == "INFERENCE.QUALITY_REJECTED"
+    assert detail_data["failureMessage"] == "信号质量评分未达到要求，请重新采集"
+    assert detail_data["result"] is None
+    assert detail_data["qualityFailure"] == {
+        "reason": "LOW_SCORE",
+        "details": {"score": score, "threshold": 70},
+    }
+    assert not {"failureDetail", "profileSnapshot"}.intersection(detail_data)
+    assert output_download.status_code == 404
+    assert redis_client.xpending(stream, group)["pending"] == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_controlled_input_failure_is_public_and_stale_token_cannot_overwrite(
+    tmp_path,
+    inference_stream,
+    monkeypatch,
+):
+    """单轮消费者安全呈现多块错误并拒绝旧令牌改写终态。"""
+    redis_client, stream, group = inference_stream
+    claimed_tokens = []
+    actual_claim = inference_command.claim_task_for_execution
+
+    def capture_claimed_token(*, task_id: int):
+        """记录消费者实际取得的执行令牌用于终态失权验证。"""
+        token = actual_claim(task_id=task_id)
+        if token is not None:
+            claimed_tokens.append(token)
+        return token
+
+    monkeypatch.setattr(
+        inference_command,
+        "claim_task_for_execution",
+        capture_claimed_token,
+    )
+    content = "timestampFrame,avgR,avgG,avgB,blockIndex\n0,120,128,136,1\n100,121,128,136,0\n"
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        task, username = _create_ppg_v1_input_failure_task(content)
+        _run_once()
+        task.refresh_from_db()
+
+        assert task.status == Task.StatusChoices.FAILED
+        assert task.failure_code == "INFERENCE.INVALID_INPUT"
+        assert task.failure_message == "当前算法版本仅支持单块 PPG"
+        assert task.failure_detail is None
+        assert task.result_payload is None
+        assert not TaskMetric.objects.filter(task=task).exists()
+        assert task.attempt_count == 1
+        assert len(claimed_tokens) == 1
+        assert redis_client.xpending(stream, group)["pending"] == 0
+
+        async def query_task_detail():
+            """用任务所有者令牌读取普通详情中的受控失败文案。"""
+            client = AsyncClient()
+            login = await client.post(
+                "/api/v1/ios-cn/auth/login",
+                data=json.dumps({"username": username, "password": "Dawn-valley-483!strong"}),
+                content_type="application/json",
+            )
+            try:
+                response = await client.get(
+                    f"/api/v1/ios-cn/tasks/{task.pk}",
+                    headers={"Authorization": f"Bearer {login.json()['data']['accessToken']}"},
+                )
+                return login, response
+            finally:
+                await sync_to_async(connections.close_all, thread_sensitive=True)()
+
+        login, detail = asyncio.run(query_task_detail())
+        assert login.status_code == 200
+        assert detail.status_code == 200
+        detail_data = detail.json()["data"]
+        assert detail_data["status"] == Task.StatusChoices.FAILED
+        assert detail_data["failureCode"] == "INFERENCE.INVALID_INPUT"
+        assert detail_data["failureMessage"] == "当前算法版本仅支持单块 PPG"
+        assert detail_data["result"] is None
+        assert not {"failureDetail", "profileSnapshot"}.intersection(detail_data)
+
+        original_failure = (
+            task.failure_code,
+            task.failure_message,
+            task.failure_detail,
+            task.finished_at,
+        )
+        assert (
+            record_task_execution_failure(
+                task_id=task.pk,
+                execution_token=claimed_tokens[0],
+                error=InputError(InputErrorReason.INVALID_TIMESTAMP),
+            )
+            is None
+        )
+        task.refresh_from_db()
+        assert (
+            task.failure_code,
+            task.failure_message,
+            task.failure_detail,
+            task.finished_at,
+        ) == original_failure
+        assert not TaskMetric.objects.filter(task=task).exists()

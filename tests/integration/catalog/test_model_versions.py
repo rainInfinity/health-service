@@ -13,6 +13,8 @@ from health_service.application.catalog_exceptions import CatalogConflict, Catal
 from health_service.infrastructure.persistence.catalog import get_model_version
 from health_service.models import Model, ModelVersion
 
+from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
+
 
 @pytest.mark.django_db
 def test_model_and_version_creation_reject_duplicate_identity():
@@ -21,7 +23,7 @@ def test_model_and_version_creation_reject_duplicate_identity():
     create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
 
@@ -31,7 +33,7 @@ def test_model_and_version_creation_reject_duplicate_identity():
         create_model_version(
             model_id=model.model_id,
             version="1.0",
-            algorithm_key="hr_br.example",
+            algorithm_key=TEST_ALGORITHM_KEY,
             params=None,
         )
 
@@ -46,7 +48,7 @@ def test_model_version_creation_rejects_missing_owner_without_orphan():
         create_model_version(
             model_id=999999,
             version="1.0",
-            algorithm_key="hr_br.example",
+            algorithm_key=TEST_ALGORITHM_KEY,
             params=None,
         )
 
@@ -61,7 +63,7 @@ def test_model_version_results_are_evaluated_without_per_row_queries():
         create_model_version(
             model_id=model.model_id,
             version=f"1.{index}",
-            algorithm_key="hr_br.example",
+            algorithm_key=TEST_ALGORITHM_KEY,
             params={"window": index},
         )
         for index in range(10)
@@ -70,7 +72,7 @@ def test_model_version_results_are_evaluated_without_per_row_queries():
         created = create_model_version(
             model_id=model.model_id,
             version="2.0",
-            algorithm_key="hr_br.example",
+            algorithm_key=TEST_ALGORITHM_KEY,
             params={"window": 10},
         )
     assert sum(query["sql"].lstrip().upper().startswith("SELECT") for query in create_queries) == 1
@@ -105,13 +107,13 @@ def test_model_version_update_changes_only_unpublished_configuration():
     version = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="hr_br.example",
+        algorithm_key=TEST_ALGORITHM_KEY,
         params=None,
     )
 
     updated = update_model_version(
         version_id=version.version_id,
-        changes={"params": {"mode": "diagnostic"}},
+        changes={"params": {"mode": "test"}},
     )
 
-    assert updated.params == {"mode": "diagnostic"}
+    assert updated.params == {"mode": "test"}
