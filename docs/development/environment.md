@@ -8,34 +8,53 @@
 
 ### Python 工作区
 
-根目录 `pyproject.toml` 只编排两个成员，不是第三个业务项目；所有成员共用根目录的 `uv.lock` 和默认 `.venv`。`packages/health-service` 包含 Django `health_service` 与 `config`，声明业务运行依赖并显式依赖本地 `health-inference`；`packages/health-inference` 是纯 Python 计算包，目前不声明第三方运行依赖。
+根目录 `pyproject.toml` 只编排两个成员，不是第三个业务项目；所有成员共用根目录的 `uv.lock` 和默认 `.venv`。`packages/health-service` 包含 Django `health_service` 与 `config`，声明业务运行依赖并显式依赖本地 `health-inference`；`health-inference` 基础依赖包含 pandas 与 NumPy，SciPy 和 NeuroKit2 仅由其 `ppg` 可选项提供。
 
 ```sh
 # 完整开发与测试环境
-uv sync --locked --all-packages
+uv sync --locked --all-packages --all-extras
 # 仅业务成员及其运行依赖
 uv sync --locked --package health-service --no-dev
-# 仅计算成员及其运行依赖
+# 仅计算成员及其运行依赖，包含 pandas/NumPy，不安装 SciPy/NeuroKit2
 uv sync --locked --package health-inference --no-dev
+# PPG/HR/BR 推理计算环境，额外安装 SciPy/NeuroKit2
+uv sync --locked --package health-inference --extra ppg --no-dev
 ```
 
 `uv run --package ...` 选择运行成员，不切换当前目录；以下管理命令和 Web/消费者入口均从仓库根目录运行。
 
-## 启动 PostgreSQL
+## 创建并启动本机 PostgreSQL 测试数据库
 
-可使用已有 PostgreSQL 实例，也可用仓库外部的临时容器：
+本机应用和测试共用此 PostgreSQL 容器，但使用不同数据库：`.env` 中的 `POSTGRES_DB=health_service` 用于本机应用；pytest-django 默认使用独立的 `test_health_service`。首次创建具名数据卷和容器：
 
 ```sh
-docker run --rm --detach \
-  --name health-service-postgres \
+docker volume create health-service-test-postgres-data
+
+docker run --detach \
+  --name health-service-test-postgres \
+  --restart unless-stopped \
   --publish 127.0.0.1:55432:5432 \
+  --mount type=volume,source=health-service-test-postgres-data,target=/var/lib/postgresql/data \
   --env POSTGRES_DB=health_service \
   --env POSTGRES_USER=health_service \
   --env POSTGRES_PASSWORD=local-development-only \
   postgres:16.4-alpine
 ```
 
-容器停止后会自动删除。不要在生产环境使用示例密码。
+确认数据库已就绪：
+
+```sh
+docker exec health-service-test-postgres pg_isready --username=health_service --dbname=health_service
+```
+
+输出 `accepting connections` 后即可使用。之后启动和停止容器使用：
+
+```sh
+docker start health-service-test-postgres
+docker stop health-service-test-postgres
+```
+
+数据库文件保存在 `health-service-test-postgres-data` 具名卷中；停止容器不会删除数据。不要使用 `docker volume rm health-service-test-postgres-data`，该命令会永久删除本机数据库。示例密码仅用于本机开发，不要用于生产环境；PostgreSQL 初始化后，修改 `.env` 密码不会自动修改数据库用户密码。
 
 ## 配置环境变量
 
@@ -49,7 +68,7 @@ uv run --locked --all-packages python -c 'import secrets; print(secrets.token_ur
 uv run --locked --all-packages python -c 'import secrets; print(secrets.token_urlsafe(50))'
 ```
 
-将第一条命令输出填写到 `.env` 的 `DJANGO_SECRET_KEY`，第二条填写到独立的 `JWT_SIGNING_KEY`；不要复用密钥。再为 `POSTGRES_PASSWORD` 填入本地数据库密码。上面的 PostgreSQL 容器示例使用 `local-development-only`，仅用于本地开发，不要用于生产环境。
+将第一条命令输出填写到 `.env` 的 `DJANGO_SECRET_KEY`，第二条填写到独立的 `JWT_SIGNING_KEY`；不要复用密钥。将 `POSTGRES_PASSWORD` 设为本机数据库密码；使用上面的容器示例时填 `local-development-only`。该密码仅用于本机开发，不要用于生产环境。
 
 Django 从项目根目录读取可选的 `.env`，不受启动时工作目录影响。进程环境变量优先于 `.env`；已设置为空的必填进程变量仍会报错，不会回退到文件值。`.env` 已加入 Git 忽略规则，不要提交真实密钥或数据库密码。
 
@@ -105,6 +124,22 @@ export POSTGRES_PASSWORD=local-development-only
 export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT=55432
 ```
+
+## 运行本机测试
+
+先按上文启动 PostgreSQL 容器，并确保 Django 使用的数据库连接配置（根目录 `.env` 或当前进程环境）与容器一致。所有本机 pytest 命令都使用可复用的测试库：
+
+```sh
+uv run --locked --all-packages pytest --reuse-db
+```
+
+测试库名默认为 `test_health_service`。`--reuse-db` 会跨测试运行保留该库及其结构；迁移或测试库结构变化后，使用以下命令重建。它会清空并重建测试库，不会重建应用数据库 `health_service`：
+
+```sh
+uv run --locked --all-packages pytest --reuse-db --create-db
+```
+
+日常运行不要省略 `--reuse-db`，否则 pytest-django 会按默认行为重新创建并清理测试库。
 
 ## 安装、迁移与启动
 
