@@ -74,6 +74,7 @@ def test_reupload_selects_complete_file_and_preserves_historical_record(tmp_path
             user_id=user.pk,
             channel="ios-cn",
             logical_name="ppg",
+            source_filename="ppg.csv",
             source=_uploaded_file(b"timestampFrame,avgR\n1,2\n"),
         )
         second = upload_task_input(
@@ -81,6 +82,7 @@ def test_reupload_selects_complete_file_and_preserves_historical_record(tmp_path
             user_id=user.pk,
             channel="ios-cn",
             logical_name="ppg",
+            source_filename="ppg.csv",
             source=_uploaded_file(b"timestampFrame,avgR\n2,3\n"),
         )
 
@@ -102,6 +104,7 @@ def test_reupload_selects_complete_file_and_preserves_historical_record(tmp_path
             user_id=user.pk,
             channel="ios-cn",
             logical_name="undeclared",
+            source_filename="ppg.csv",
             source=_uploaded_file(b"payload"),
         )
     assert TaskInputFile.objects.filter(task_id=task.task_id).count() == 2
@@ -142,6 +145,7 @@ def test_non_draft_and_wrong_owner_uploads_are_rejected_without_registration(
                 user_id=owner.pk,
                 channel="ios-cn",
                 logical_name="ppg",
+                source_filename="ppg.csv",
                 source=_uploaded_file(b"submitted"),
             )
         with pytest.raises(TaskNotFound):
@@ -151,6 +155,7 @@ def test_non_draft_and_wrong_owner_uploads_are_rejected_without_registration(
                 channel="ios-cn",
                 logical_name="ppg",
                 source=_uploaded_file(b"unauthorized"),
+                source_filename="ppg.csv",
             )
 
     assert not TaskInputFile.objects.filter(task_id=task.task_id).exists()
@@ -173,6 +178,7 @@ def test_concurrent_same_name_uploads_leave_one_selected_file(tmp_path):
                 user_id=user.pk,
                 channel="ios-cn",
                 logical_name="ppg",
+                source_filename="ppg.csv",
                 source=_uploaded_file(content),
             )
             return result.file_id

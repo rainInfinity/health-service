@@ -2,6 +2,18 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TaskInputUploadContextData:
+    """保存草稿输入路径所需的权威任务归属和创建时间。"""
+
+    task_id: int  # 任务主键。
+    user_id: int  # 任务所属账号主键。
+    channel_label: str  # 任务固定渠道代码。
+    algorithm_key: str  # 草稿固定模型版本的算法标识。
+    created_at: datetime  # 任务创建时间，带时区。
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +25,16 @@ class TaskExecutionContextData:
     profile_snapshot: Mapping[str, object] | None  # 提交时冻结的资料快照。
     client_metadata: Mapping[str, object] | None  # 可选客户端元数据；未提供时为空。
     input_storage_keys: Mapping[str, str]  # 已选输入逻辑名到任务存储相对键。
+
+
+@dataclass(frozen=True, slots=True)
+class TaskOutputPublicationData:
+    """保存成功任务正式结果目录发布所需的权威数据。"""
+
+    task_id: int  # 任务主键。
+    channel_label: str  # 任务固定渠道代码。
+    created_at: datetime  # 任务创建时间，带时区。
+    output_storage_keys: Mapping[str, str]  # 成功结果中逻辑名到不可变实际存储键。
 
 
 @dataclass(frozen=True, slots=True)

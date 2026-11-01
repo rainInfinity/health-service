@@ -165,6 +165,7 @@ def upload_catalog_model_artifact(
     artifact = upload_model_artifact(
         version_id=version_id,
         logical_name=logical_name,
+        source_filename=file.name,
         source=file,
     )
     return success_response(

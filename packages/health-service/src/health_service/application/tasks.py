@@ -12,6 +12,7 @@ from health_inference.quality import quality_rejection_from_mapping
 from health_inference.registry import get_algorithm
 
 from health_service.application.dispatch import dispatch_task
+from health_service.application.execution import publish_successful_task_outputs
 from health_service.application.task_exceptions import (
     InvalidTaskPagination,
     TaskConflict,
@@ -27,6 +28,8 @@ from health_service.infrastructure.persistence.exceptions import (
 from health_service.infrastructure.storage import (
     EmptyUploadError,
     InvalidStorageKey,
+    InvalidStorageName,
+    InvalidUploadExtension,
     LocalFileStorage,
     StorageArea,
     StorageError,
@@ -63,9 +66,10 @@ def upload_task_input(
     user_id: int,
     channel: str,
     logical_name: str,
+    source_filename: str,
     source: object,
 ) -> TaskInputFileData:
-    """在草稿行锁内完整保存并登记算法声明的输入文件。"""
+    """在草稿行锁内校验后缀、完整保存并登记算法声明的输入文件。"""
     if channel not in ORDINARY_CHANNELS:
         raise TaskNotFound
     storage: LocalFileStorage | None = None
@@ -73,26 +77,38 @@ def upload_task_input(
     try:
         with transaction.atomic():
             try:
-                algorithm_key = persistence.lock_draft_task_for_input_upload(
+                upload_context = persistence.lock_draft_task_for_input_upload(
                     task_id=task_id,
                     user_id=user_id,
                     channel_label=channel,
                 )
             except TaskRecordConflictError as error:
                 raise TaskConflict from error
-            if algorithm_key is None:
+            if upload_context is None:
                 raise TaskNotFound
-            algorithm = get_algorithm(algorithm_key)
+            algorithm = get_algorithm(upload_context.algorithm_key)
             if logical_name not in algorithm.required_inputs:
                 raise TaskInputInvalid
             storage = _task_storage()
             try:
-                stored_file = storage.save_upload(
+                stored_file = storage.save_task_input(
                     source,
-                    area=StorageArea.TASK_DATA,
+                    source_filename=source_filename,
+                    allowed_extensions=algorithm.input_extensions[logical_name],
+                    created_at=upload_context.created_at,
+                    task_id=upload_context.task_id,
+                    user_id=upload_context.user_id,
+                    channel=upload_context.channel_label,
+                    algorithm_key=upload_context.algorithm_key,
+                    logical_name=logical_name,
                     max_bytes=settings.MAX_UPLOAD_BYTES,
                 )
-            except (EmptyUploadError, UploadTooLargeError) as error:
+            except (
+                EmptyUploadError,
+                InvalidStorageName,
+                InvalidUploadExtension,
+                UploadTooLargeError,
+            ) as error:
                 raise TaskInputInvalid from error
             return persistence.register_selected_task_input(
                 task_id=task_id,
@@ -300,6 +316,7 @@ def open_user_task_output_file(
     storage_key = output_files.get(logical_name)
     if not isinstance(storage_key, str) or not storage_key:
         raise TaskNotFound
+    publish_successful_task_outputs(task_id=task_id)
     return _open_task_file(storage_key)
 
 

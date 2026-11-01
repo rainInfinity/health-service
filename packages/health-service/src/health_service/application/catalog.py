@@ -29,6 +29,8 @@ from health_service.infrastructure.persistence.exceptions import (
 )
 from health_service.infrastructure.storage import (
     EmptyUploadError,
+    InvalidStorageName,
+    InvalidUploadExtension,
     LocalFileStorage,
     StorageArea,
     StorageError,
@@ -123,9 +125,10 @@ def upload_model_artifact(
     *,
     version_id: int,
     logical_name: str,
+    source_filename: str,
     source: BinaryIO | object,
 ) -> ModelArtifactData:
-    """先完整保存制品，再在同一版本锁内登记；登记失败删除本次文件。"""
+    """先校验算法契约和后缀，再在版本锁内登记完整制品。"""
     if not logical_name.strip() or len(logical_name) > 255:
         raise CatalogConfigurationInvalid
     storage = _local_storage()
@@ -135,9 +138,19 @@ def upload_model_artifact(
             version = persistence.lock_model_version(version_id=version_id)
             if version.published_at is not None:
                 raise CatalogConflict
-            stored_file = storage.save_upload(
+            try:
+                algorithm = get_algorithm(version.algorithm_key)
+            except UnknownAlgorithmError as error:
+                raise CatalogConfigurationInvalid from error
+            if logical_name not in algorithm.required_artifacts:
+                raise CatalogConfigurationInvalid
+            stored_file = storage.save_model_artifact(
                 source,
-                area=StorageArea.MODEL_ARTIFACT,
+                source_filename=source_filename,
+                allowed_extensions=algorithm.artifact_extensions[logical_name],
+                model_code=version.model_code,
+                version=version.version,
+                logical_name=logical_name,
                 max_bytes=settings.MAX_UPLOAD_BYTES,
             )
             return persistence.create_model_artifact(
@@ -153,9 +166,18 @@ def upload_model_artifact(
             raise CatalogNotFound from error
         if isinstance(error, ModelArtifactConflictError):
             raise CatalogConflict from error
-        if isinstance(error, (UploadTooLargeError, EmptyUploadError)):
+        if isinstance(
+            error,
+            (
+                EmptyUploadError,
+                InvalidStorageName,
+                InvalidUploadExtension,
+                UploadTooLargeError,
+            ),
+        ):
             raise CatalogConfigurationInvalid from error
         raise
+
 
 
 def create_metric_definition(

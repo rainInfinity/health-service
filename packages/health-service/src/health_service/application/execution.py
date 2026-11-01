@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from django.conf import settings
+from django.db import transaction
 from health_inference import (
     AlgorithmDefinition,
     InferenceError,
@@ -17,6 +18,7 @@ from health_inference import (
 )
 from health_inference.exceptions import InputError, InputErrorReason
 
+from health_service.inference_logging import log_inference_event
 from health_service.infrastructure.persistence import catalog as catalog_persistence
 from health_service.infrastructure.persistence import tasks as persistence
 from health_service.infrastructure.storage import (
@@ -252,12 +254,39 @@ def save_task_execution_success(
         algorithm=algorithm,
         values=result.metrics,
     )
-    return persistence.save_task_execution_success(
+    success_committed = persistence.save_task_execution_success(
         task_id=task_id,
         execution_token=execution_token,
         result_payload=result_payload,
         metrics=projected_metrics,
     )
+    if success_committed:
+        transaction.on_commit(lambda: publish_successful_task_outputs(task_id=task_id))
+    return success_committed
+
+
+def publish_successful_task_outputs(*, task_id: int) -> bool:
+    """锁定并发布数据库权威成功结果；文件系统故障不撤销任务成功。"""
+    with transaction.atomic():
+        publication = persistence.lock_successful_task_output_publication(
+            task_id=task_id,
+        )
+        if publication is None or not publication.output_storage_keys:
+            return False
+        try:
+            return _task_storage().publish_task_output_directory(
+                channel=publication.channel_label,
+                created_at=publication.created_at,
+                task_id=publication.task_id,
+                output_storage_keys=publication.output_storage_keys,
+            )
+        except StorageError:
+            log_inference_event(
+                "inference.output.publish_failed",
+                task_id=task_id,
+                reason="output_publish_failed",
+            )
+            return False
 
 
 def _project_selected_metrics(

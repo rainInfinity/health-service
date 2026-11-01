@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connections
 from django.test import AsyncClient, override_settings
+from health_service.models import ModelArtifact
 
 
 async def _login(client: AsyncClient, channel: str, username: str, password: str):
@@ -264,7 +265,7 @@ def test_manager_artifact_upload_uses_logical_name_and_hides_storage_key(tmp_pat
         version_response = await client.post(
             f"/api/v1/manager/models/{model_id}/versions",
             data=json.dumps(
-                {"version": "1.0", "algorithmKey": "hr_br", "params": None}
+                {"version": "1.0", "algorithmKey": "ppg.active.offline.spo2.v1", "params": None}
             ),
             content_type="application/json",
             headers=headers,
@@ -273,37 +274,94 @@ def test_manager_artifact_upload_uses_logical_name_and_hides_storage_key(tmp_pat
         upload = await client.post(
             f"/api/v1/manager/model-versions/{version_id}/artifacts",
             data={
-                "logicalName": "weights",
-                "file": SimpleUploadedFile("weights.bin", b"weights-data"),
+                "logicalName": "spo2",
+                "file": SimpleUploadedFile("weights.ONNX", b"weights-data"),
             },
             headers=headers,
         )
         duplicate = await client.post(
             f"/api/v1/manager/model-versions/{version_id}/artifacts",
             data={
-                "logicalName": "weights",
-                "file": SimpleUploadedFile("other.bin", b"other-data"),
+                "logicalName": "spo2",
+                "file": SimpleUploadedFile("other.onnx", b"other-data"),
+            },
+            headers=headers,
+        )
+        undeclared = await client.post(
+            f"/api/v1/manager/model-versions/{version_id}/artifacts",
+            data={
+                "logicalName": "unknown",
+                "file": SimpleUploadedFile("unknown.json", b"unknown"),
+            },
+            headers=headers,
+        )
+        unsupported = await client.post(
+            f"/api/v1/manager/model-versions/{version_id}/artifacts",
+            data={
+                "logicalName": "spo2",
+                "file": SimpleUploadedFile("spo2.json", b"wrong suffix"),
+            },
+            headers=headers,
+        )
+        missing_suffix = await client.post(
+            f"/api/v1/manager/model-versions/{version_id}/artifacts",
+            data={
+                "logicalName": "spo2",
+                "file": SimpleUploadedFile("spo2", b"missing suffix"),
             },
             headers=headers,
         )
         await _close_worker_database_connection()
-        return model_response, version_response, upload, duplicate
+        return (
+            model_response,
+            version_response,
+            upload,
+            duplicate,
+            undeclared,
+            unsupported,
+            missing_suffix,
+        )
 
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         MAX_UPLOAD_BYTES=64,
     ):
-        model_response, version_response, upload, duplicate = asyncio.run(exercise_api())
+        (
+            model_response,
+            version_response,
+            upload,
+            duplicate,
+            undeclared,
+            unsupported,
+            missing_suffix,
+        ) = asyncio.run(exercise_api())
 
     assert model_response.status_code == version_response.status_code == 201
     assert upload.status_code == 201
-    assert upload.json()["data"]["logicalName"] == "weights"
+    assert upload.json()["data"]["logicalName"] == "spo2"
     assert upload.json()["data"]["sizeBytes"] == len(b"weights-data")
     assert not {"storageKey", "storage_key", "path"}.intersection(upload.json()["data"])
     assert duplicate.status_code == 409
-    artifact_files = tuple(
-        Path(tmp_path / "artifacts").rglob("*.bin")
+    assert undeclared.status_code == 422
+    assert unsupported.status_code == 422
+    assert missing_suffix.status_code == 422
+    assert (
+        ModelArtifact.objects.filter(model_version__model__code="artifact").count()
+        == 1
     )
+    artifact_files = tuple(Path(tmp_path / "artifacts").rglob("*.onnx"))
     assert len(artifact_files) == 1
     assert artifact_files[0].read_bytes() == b"weights-data"
+    artifact_path = artifact_files[0]
+    relative_path = artifact_path.relative_to(tmp_path / "artifacts")
+    assert relative_path.parts[:2] == ("artifact", "1.0")
+    assert artifact_path.name.startswith("spo2-")
+    assert artifact_path.name.endswith(".onnx")
+    uuid_part = artifact_path.name[len("spo2-") : -len(".onnx")]
+    assert len(uuid_part) == 32
+    assert all(character in "0123456789abcdef" for character in uuid_part)
+    assert (
+        ModelArtifact.objects.get(model_version__model__code="artifact").storage_key
+        == relative_path.as_posix()
+    )

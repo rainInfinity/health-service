@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -9,13 +11,14 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connections
 from django.test import AsyncClient, override_settings
+from django.utils import timezone
 from health_service.application.catalog import (
     create_model,
     create_model_version,
     publish_model_version,
     select_channel_model_version,
 )
-from health_service.models import TaskInputFile
+from health_service.models import Task, TaskInputFile
 
 from tests.integration.algorithm_fixtures import TEST_ALGORITHM_KEY
 
@@ -34,12 +37,24 @@ async def _close_worker_database_connection() -> None:
     await sync_to_async(connections.close_all, thread_sensitive=True)()
 
 
+def _set_task_creation_time_to_previous_day(task_id: int) -> None:
+    """将测试草稿创建时间移到前一日，模拟跨日上传。"""
+    Task.objects.filter(pk=task_id).update(
+        created_at=timezone.now() - timedelta(days=1)
+    )
+
+
+
 @pytest.mark.django_db(transaction=True)
 def test_task_input_upload_http_contract(tmp_path):
     """HTTP 上传按 ppg 逻辑名登记完整文件并拒绝未声明输入。"""
     username = "task-input-http-owner"
     password = "Canyon-silver-295!strong"
     get_user_model().objects.create_user(username=username, password=password)
+    get_user_model().objects.create_user(
+        username="task-input-http-other",
+        password="Canyon-silver-295!strong",
+    )
     model = create_model(code="task-input-http", name="Task input", description=None)
     draft = create_model_version(
         model_id=model.model_id,
@@ -66,6 +81,10 @@ def test_task_input_upload_http_contract(tmp_path):
             headers=headers,
         )
         task_id = created.json()["data"]["taskId"]
+        await sync_to_async(
+            _set_task_creation_time_to_previous_day,
+            thread_sensitive=True,
+        )(task_id)
         uploaded = await client.post(
             f"/api/v1/ios-cn/tasks/{task_id}/files",
             data={
@@ -78,6 +97,34 @@ def test_task_input_upload_http_contract(tmp_path):
             },
             headers=headers,
         )
+        uppercase = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/files",
+            data={
+                "logicalName": "ppg",
+                "file": SimpleUploadedFile(
+                    "client-name.CSV",
+                    b"timestampFrame,avgR\n2,3\n",
+                    content_type="text/csv",
+                ),
+            },
+            headers=headers,
+        )
+        missing_suffix = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/files",
+            data={
+                "logicalName": "ppg",
+                "file": SimpleUploadedFile("client-name", b"missing suffix"),
+            },
+            headers=headers,
+        )
+        unsupported_suffix = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/files",
+            data={
+                "logicalName": "ppg",
+                "file": SimpleUploadedFile("client-name.json", b"unsupported suffix"),
+            },
+            headers=headers,
+        )
         undeclared = await client.post(
             f"/api/v1/ios-cn/tasks/{task_id}/files",
             data={
@@ -86,27 +133,84 @@ def test_task_input_upload_http_contract(tmp_path):
             },
             headers=headers,
         )
+        other_login = await _login(
+            client,
+            "task-input-http-other",
+            "Canyon-silver-295!strong",
+        )
+        other_headers = {
+            "Authorization": f"Bearer {other_login.json()['data']['accessToken']}"
+        }
+        unauthorized = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/files",
+            data={
+                "logicalName": "ppg",
+                "file": SimpleUploadedFile("other.csv", b"unauthorized"),
+            },
+            headers=other_headers,
+        )
         await _close_worker_database_connection()
-        return created, uploaded, undeclared, task_id
+        return (
+            created,
+            uploaded,
+            uppercase,
+            missing_suffix,
+            unsupported_suffix,
+            undeclared,
+            unauthorized,
+            task_id,
+        )
+
 
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         MAX_UPLOAD_BYTES=1024,
     ):
-        created, uploaded, undeclared, task_id = asyncio.run(exercise_api())
+        (
+            created,
+            uploaded,
+            uppercase,
+            missing_suffix,
+            unsupported_suffix,
+            undeclared,
+            unauthorized,
+            task_id,
+        ) = asyncio.run(exercise_api())
 
     assert created.status_code == 201
     assert uploaded.status_code == 201
+    assert uppercase.status_code == 201
+    assert missing_suffix.status_code == 422
+    assert unsupported_suffix.status_code == 422
+    assert undeclared.status_code == 422
+    assert unauthorized.status_code == 404
     upload_data = uploaded.json()["data"]
     assert upload_data["logicalName"] == "ppg"
     assert upload_data["sizeBytes"] > 0
     assert upload_data["isSelected"] is True
     assert not {"storageKey", "storage_key", "path"}.intersection(upload_data)
-    assert undeclared.status_code == 422
-    input_file = TaskInputFile.objects.get(task_id=task_id)
-    assert input_file.logical_name == "ppg"
-    assert input_file.is_selected is True
-    assert (tmp_path / "tasks" / input_file.storage_key).read_bytes() == (
-        b"timestampFrame,avgR\n1,2\n"
+    records = tuple(TaskInputFile.objects.filter(task_id=task_id).order_by("pk"))
+    assert len(records) == 2
+    selected = next(item for item in records if item.is_selected)
+    assert selected.logical_name == "ppg"
+    task = selected.task
+    task_created_at = task.created_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    date_part = task_created_at.strftime("%Y%m%d")
+    assert date_part != timezone.now().astimezone(ZoneInfo("Asia/Shanghai")).strftime(
+        "%Y%m%d"
+    )
+    filename = selected.storage_key.rsplit("/", 1)[-1]
+    expected_prefix = (
+        f"{task_created_at.strftime('%Y%m%d_%H%M%S')}-{task.pk}-"
+        f"{task.user_id}-{task.model_version.algorithm_key}-ppg-"
+    )
+    assert selected.storage_key.split("/")[:2] == [task.channel.label, date_part]
+    assert filename.startswith(expected_prefix)
+    uuid_part, extension = filename[len(expected_prefix) :].rsplit(".", 1)
+    assert extension == "csv"
+    assert len(uuid_part) == 32
+    assert all(character in "0123456789abcdef" for character in uuid_part)
+    assert (tmp_path / "tasks" / selected.storage_key).read_bytes() == (
+        b"timestampFrame,avgR\n2,3\n"
     )

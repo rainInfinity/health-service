@@ -64,6 +64,7 @@ def _upload_ppg(*, user_id: int, task_id: int):
         user_id=user_id,
         channel="ios-cn",
         logical_name="ppg",
+        source_filename="client.csv",
         source=SimpleUploadedFile(
             "client.csv",
             b"timestampFrame,avgR\n1,2\n",

@@ -17,6 +17,7 @@ _EVENT_LEVELS = {
     "inference.task.failed": logging.ERROR,
     "inference.task.lease_lost": logging.WARNING,
     "inference.dispatch.failed": logging.WARNING,
+    "inference.output.publish_failed": logging.WARNING,
 }
 _REASONS = frozenset(
     {
@@ -28,6 +29,7 @@ _REASONS = frozenset(
         "ownership_rejected",
         "dispatch_publish_failed",
         "dispatch_marker_failed",
+        "output_publish_failed",
     }
 )
 _EXCEPTION_TYPES = frozenset({"DatabaseError", "RedisError"})

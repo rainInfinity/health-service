@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from health_service.api.structured_logging import ConsoleApiFormatter, StructuredApiFormatter
+from health_service.inference_logging import inference_log_fields
 
 
 def test_console_and_json_share_beijing_timestamp_and_millisecond_duration():
@@ -73,3 +74,25 @@ def test_malformed_inference_identifiers_are_not_echoed():
     record.reason = "PRIVATE-SENTINEL"
     entry = json.loads(StructuredApiFormatter().format(record))
     assert set(entry) == {"timestamp", "level", "event"}
+
+
+def test_output_publication_failure_exposes_only_safe_fields():
+    """正式结果目录故障日志只暴露事件、任务号和固定原因。"""
+    record = logging.LogRecord(
+        "health_service.inference",
+        logging.WARNING,
+        __file__,
+        1,
+        "ignored",
+        (),
+        None,
+    )
+    record.event = "inference.output.publish_failed"
+    record.taskId = 42
+    record.reason = "output_publish_failed"
+    record.path = "/PRIVATE-PATH"
+
+    assert inference_log_fields(record) == {
+        "taskId": 42,
+        "reason": "output_publish_failed",
+    }

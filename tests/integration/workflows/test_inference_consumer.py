@@ -4,12 +4,14 @@ import asyncio
 import csv
 import json
 import math
+import os
 import signal
 from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from time import sleep
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -45,7 +47,10 @@ from health_service.application.tasks import (
     submit_user_task,
     upload_task_input,
 )
-from health_service.infrastructure.inference_adapter import clear_version_runtime_cache
+from health_service.infrastructure.inference_adapter import (
+    _version_runtime,
+    clear_version_runtime_cache,
+)
 from health_service.infrastructure.inference_adapter import (
     run_task_inference as run_actual_task_inference,
 )
@@ -138,9 +143,16 @@ def _store_ppg_input(
         Path(settings.TASK_DATA_ROOT),
         Path(settings.MODEL_ARTIFACT_ROOT),
     )
-    stored = storage.save_upload(
+    stored = storage.save_task_input(
         BytesIO(content.encode("utf-8")),
-        area=StorageArea.TASK_DATA,
+        source_filename=f"{task.pk}.csv",
+        allowed_extensions=frozenset({"csv"}),
+        created_at=task.created_at,
+        task_id=task.pk,
+        user_id=task.user_id,
+        channel=task.channel.label,
+        algorithm_key=task.model_version.algorithm_key,
+        logical_name="ppg",
         max_bytes=1024 * 1024,
     )
     TaskInputFile.objects.create(
@@ -195,10 +207,12 @@ def isolated_quality_algorithm(monkeypatch):
         is_example=False,
         required_inputs=(),
         required_artifacts=(),
+        input_extensions={},
+        artifact_extensions={},
         required_profile_fields=(),
         parameter_validator=lambda _: None,
         result_validator=lambda _: None,
-        runner=reject_quality,
+        resource_factory=lambda _: reject_quality,
         metric_contracts=(),
     )
     clear_version_runtime_cache()
@@ -255,6 +269,7 @@ def test_once_dispatches_and_executes_test_algorithm_task(
     capsys,
 ):
     """单轮命令补发并完成测试算法任务，保存结果和投影指标。"""
+    clear_version_runtime_cache()
     client, stream, group = inference_stream
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
@@ -266,7 +281,7 @@ def test_once_dispatches_and_executes_test_algorithm_task(
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.SUCCEEDED
     assert task.result_payload == {"completed": True}
-    assert TaskMetric.objects.filter(task=task).count() == 1
+    assert _version_runtime.cache_info().currsize == 0
     assert client.xpending(stream, group)["pending"] == 0
     records = parse_console_records(capsys.readouterr().out)
     assert [record["event"] for record in records] == [
@@ -889,6 +904,101 @@ def test_once_reclaims_idle_pending_message_with_xautoclaim(tmp_path, inference_
 
 
 @pytest.mark.django_db(transaction=True)
+def test_successful_terminal_message_recovers_outputs_without_rerunning(
+    tmp_path: Path,
+    inference_stream,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """成功终态消息重复到达时只恢复正式目录，不再计算或改写指标。"""
+    client, stream, group = inference_stream
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        task = _create_test_metric_task()
+        storage = LocalFileStorage(tmp_path / "tasks", tmp_path / "artifacts")
+        execution_token = uuid4()
+        execution_dir = storage.create_execution_output_dir(task.pk, execution_token)
+        output_file = execution_dir / "processed.csv"
+        output_file.write_bytes(b"authoritative result")
+        output_key = storage.validate_output_file(
+            task.pk,
+            execution_token,
+            output_file,
+        )
+        completed_at = timezone.now()
+        Task.objects.filter(pk=task.pk).update(
+            status=Task.StatusChoices.SUCCEEDED,
+            result_payload={"completed": True, "output_files": {"report": output_key}},
+            started_at=completed_at,
+            finished_at=completed_at,
+            attempt_count=1,
+        )
+        published_dir = (
+            storage.task_data_root
+            / task.channel.label
+            / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task.pk)
+        )
+        assert not published_dir.is_symlink()
+        original_metrics = list(
+            TaskMetric.objects.filter(task=task).values_list(
+                "metric_id",
+                "numeric_value",
+                "boolean_value",
+            )
+        )
+        run_calls: list[int] = []
+
+        def unexpected_inference(*, task_id: int, execution_token) -> None:
+            """检测终态消息是否错误地启动了算法。"""
+            run_calls.append(task_id)
+            raise AssertionError("终态任务不得重新执行")
+
+        monkeypatch.setattr(
+            inference_command,
+            "run_task_inference",
+            unexpected_inference,
+        )
+        client.xadd(stream, {"task_id": str(task.pk)})
+        _run_once("output-recovery")
+        assert published_dir.is_symlink()
+        assert published_dir.resolve() == execution_dir.resolve()
+
+        client.xadd(stream, {"task_id": str(task.pk)})
+        _run_once("output-recovery")
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.SUCCEEDED
+    assert task.result_payload == {
+        "completed": True,
+        "output_files": {"report": output_key},
+    }
+    assert task.attempt_count == 1
+    assert run_calls == []
+    assert (
+        list(
+            TaskMetric.objects.filter(task=task).values_list(
+                "metric_id",
+                "numeric_value",
+                "boolean_value",
+            )
+        )
+        == original_metrics
+    )
+    assert client.xpending(stream, group)["pending"] == 0
+    assert [path.name for path in published_dir.iterdir()] == ["processed.csv"]
+    assert (published_dir / "processed.csv").read_bytes() == b"authoritative result"
+    records = parse_console_records(capsys.readouterr().out)
+    assert not {
+        "inference.task.started",
+        "inference.task.succeeded",
+    }.intersection(record["event"] for record in records)
+
+
+@pytest.mark.django_db(transaction=True)
 def test_heartbeat_keeps_long_inference_lease_valid(tmp_path, inference_stream, monkeypatch):
     """计算超过初始租约时独立心跳持续续约并允许成功提交。"""
     client, stream, group = inference_stream
@@ -1147,9 +1257,13 @@ def _create_ppg_v1_input_failure_task(content: str) -> tuple[Task, str]:
 def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     tmp_path,
     inference_stream,
+    monkeypatch,
+    capsys,
 ):
-    """经管理与任务 HTTP API 发布、提交、执行并下载正式 v1 结果。"""
+    """创建日与执行日跨日后，经 HTTP 上传正式 HR/BR 输入并下载结果。"""
     redis_client, stream, group = inference_stream
+    historical_ppg_bytes = synthetic_ppg_csv(heart_rate_hz=1.0).encode("utf-8")
+    selected_ppg_bytes = synthetic_ppg_csv(heart_rate_hz=1.2).encode("utf-8")
     password = "Dawn-valley-483!strong"
     user_model = get_user_model()
     manager = user_model.objects.create_user(
@@ -1168,7 +1282,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     )
 
     async def prepare_task():
-        """通过实际 HTTP 接口创建正式版本并上传、提交单块输入。"""
+        """通过实际 HTTP 接口创建正式版本、上传两份 PPG 并提交。"""
         client = AsyncClient()
         manager_login = await client.post(
             "/api/v1/manager/auth/login",
@@ -1259,13 +1373,29 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
         assert created.status_code == 201
         created_data = created.json()["data"]
         task_id = created_data["taskId"]
+        created_at = timezone.now() - timedelta(days=1)
+        await sync_to_async(Task.objects.filter(pk=task_id).update, thread_sensitive=True)(
+            created_at=created_at
+        )
+        historical_upload = await client.post(
+            f"/api/v1/ios-cn/tasks/{task_id}/files",
+            data={
+                "logicalName": "ppg",
+                "file": SimpleUploadedFile(
+                    "synthetic-ppg-history.csv",
+                    historical_ppg_bytes,
+                    content_type="text/csv",
+                ),
+            },
+            headers=owner_headers,
+        )
         uploaded = await client.post(
             f"/api/v1/ios-cn/tasks/{task_id}/files",
             data={
                 "logicalName": "ppg",
                 "file": SimpleUploadedFile(
-                    "synthetic-ppg.csv",
-                    synthetic_ppg_csv(heart_rate_hz=1.2).encode("utf-8"),
+                    "synthetic-ppg-current.csv",
+                    selected_ppg_bytes,
                     content_type="text/csv",
                 ),
             },
@@ -1284,6 +1414,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
             task_id,
             owner_headers,
             created_data,
+            historical_upload,
             uploaded,
             submitted,
         )
@@ -1299,24 +1430,68 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
             task_id,
             owner_headers,
             created_data,
+            historical_upload,
             uploaded,
             submitted,
         ) = asyncio.run(prepare_task())
         assert created_data["versionId"] == version_id
         assert created_data["isExample"] is False
-        assert uploaded.status_code == 201
+        assert historical_upload.status_code == uploaded.status_code == 201
+        historical_file_id = historical_upload.json()["data"]["fileId"]
+        historical_data = historical_upload.json()["data"]
         upload_data = uploaded.json()["data"]
-        assert upload_data["logicalName"] == "ppg"
+        assert historical_data["logicalName"] == upload_data["logicalName"] == "ppg"
         assert upload_data["isSelected"] is True
+        assert historical_file_id != upload_data["fileId"]
         assert submitted.status_code == 200
         assert submitted.json()["data"]["status"] == "SUBMITTED"
-        _run_once("ppg-v1-http")
+        actual_replace = os.replace
+        replacement_attempts = 0
+
+        def fail_first_publication(source, destination):
+            """在成功事务后仅模拟一次正式链接替换故障。"""
+            nonlocal replacement_attempts
+            replacement_attempts += 1
+            if replacement_attempts == 1:
+                raise OSError("PRIVATE-OUTPUT-PUBLISH-DETAIL")
+            return actual_replace(source, destination)
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(os, "replace", fail_first_publication)
+            _run_once("ppg-v1-http")
+
+        assert replacement_attempts == 1
+        consumer_records = parse_console_records(capsys.readouterr().out)
+        publication_failures = [
+            record
+            for record in consumer_records
+            if record["event"] == "inference.output.publish_failed"
+        ]
+        assert len(publication_failures) == 1
+        assert publication_failures[0]["taskId"] == str(task_id)
+        assert publication_failures[0]["reason"] == "output_publish_failed"
+        assert "PRIVATE-OUTPUT-PUBLISH-DETAIL" not in str(consumer_records)
+        completed_task = Task.objects.get(pk=task_id)
+        assert completed_task.status == Task.StatusChoices.SUCCEEDED
+        assert completed_task.attempt_count == 1
+        published_output_dir = (
+            Path(settings.TASK_DATA_ROOT)
+            / "ios-cn"
+            / completed_task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task_id)
+        )
+        assert not published_output_dir.is_symlink()
 
         async def query_and_download():
             """用任务所有者令牌读取详情及两个真实流式输出。"""
             client = AsyncClient()
             detail = await client.get(
                 f"/api/v1/ios-cn/tasks/{task_id}",
+                headers=owner_headers,
+            )
+            historical_response = await client.get(
+                f"/api/v1/ios-cn/tasks/{task_id}/files/{historical_file_id}/download",
                 headers=owner_headers,
             )
             ppg_response = await client.get(
@@ -1373,6 +1548,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
                     return b"".join([chunk async for chunk in content])
                 return b"".join(content)
 
+            historical_body = await read_body(historical_response)
             bodies = (
                 await read_body(ppg_response),
                 await read_body(rsp_response),
@@ -1380,19 +1556,88 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
             await sync_to_async(connections.close_all, thread_sensitive=True)()
             return (
                 detail,
+                historical_response.status_code,
+                historical_body,
                 ppg_response.status_code,
                 rsp_response.status_code,
                 bodies,
                 tuple(response.status_code for response in unauthorized_responses),
             )
 
-        detail, ppg_status, rsp_status, output_bodies, unauthorized_statuses = asyncio.run(
-            query_and_download()
-        )
+        (
+            detail,
+            historical_input_status,
+            historical_input_body,
+            ppg_status,
+            rsp_status,
+            output_bodies,
+            unauthorized_statuses,
+        ) = asyncio.run(query_and_download())
 
     task = Task.objects.get(pk=task_id)
     assert task.status == Task.StatusChoices.SUCCEEDED
     assert task.model_version_id == version_id
+    assert task.attempt_count == 1
+    storage = LocalFileStorage(tmp_path / "tasks", tmp_path / "artifacts")
+    historical_input = TaskInputFile.objects.get(pk=historical_file_id)
+    selected_input = TaskInputFile.objects.get(pk=upload_data["fileId"])
+    assert not historical_input.is_selected and selected_input.is_selected
+    assert historical_input.storage_key != selected_input.storage_key
+    created_local = task.created_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    date_part = created_local.strftime("%Y%m%d")
+    execution_local = task.finished_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    assert execution_local.date() > created_local.date()
+    timestamp_part = created_local.strftime("%Y%m%d_%H%M%S")
+    input_prefix = (
+        f"ios-cn/{date_part}/{timestamp_part}-{task.pk}-{task.user_id}-"
+        "ppg.active.offline.hr_br.v1-ppg-"
+    )
+    for input_record, expected_bytes in (
+        (historical_input, historical_ppg_bytes),
+        (selected_input, selected_ppg_bytes),
+    ):
+        assert input_record.storage_key.startswith(input_prefix)
+        assert input_record.storage_key.endswith(".csv")
+        uuid_part = Path(input_record.storage_key).stem.rsplit("-", 1)[-1]
+        assert len(uuid_part) == 32
+        assert all(character in "0123456789abcdef" for character in uuid_part)
+        assert (
+            storage.resolve_file(
+                StorageArea.TASK_DATA,
+                input_record.storage_key,
+            ).read_bytes()
+            == expected_bytes
+        )
+    output_keys = task.result_payload["output_files"]
+    assert set(output_keys) == {"processed_ppg", "processed_rsp"}
+    output_paths = {
+        logical_name: storage.resolve_file(StorageArea.TASK_DATA, storage_key)
+        for logical_name, storage_key in output_keys.items()
+    }
+    assert {path.name for path in output_paths.values()} == {
+        "ppg-processed.csv",
+        "rsp-processed.csv",
+    }
+    execution_dirs = {path.parent for path in output_paths.values()}
+    assert len(execution_dirs) == 1
+    execution_dir = next(iter(execution_dirs))
+    execution_tokens = {key.split("/")[2] for key in output_keys.values()}
+    assert len(execution_tokens) == 1
+    execution_token = next(iter(execution_tokens))
+    assert all(
+        key.startswith(f".executions/{task.pk}/{execution_token}/") for key in output_keys.values()
+    )
+    published_dir = storage.task_data_root / "ios-cn" / date_part / "outputs" / str(task.pk)
+    assert published_dir.is_symlink()
+    assert published_dir.resolve() == execution_dir
+    assert {path.name for path in published_dir.iterdir()} == {
+        "ppg-processed.csv",
+        "rsp-processed.csv",
+    }
+    assert output_paths["processed_ppg"].read_bytes() == output_bodies[0]
+    assert output_paths["processed_rsp"].read_bytes() == output_bodies[1]
+    assert historical_input_status == 200
+    assert historical_input_body == historical_ppg_bytes
     assert task.result_payload["hr"] == pytest.approx(72.0, abs=0.2)
     assert math.isfinite(task.result_payload["br"])
     assert task.result_payload["quality"]["score"] >= 70.0
@@ -1501,6 +1746,7 @@ def test_official_ppg_v1_keeps_fixed_versions_and_metric_projections_isolated(
             user_id=user.pk,
             channel="ios-cn",
             logical_name="ppg",
+            source_filename="first.csv",
             source=SimpleUploadedFile(
                 "first.csv",
                 synthetic_ppg_csv(heart_rate_hz=1.2).encode("utf-8"),
@@ -1528,6 +1774,7 @@ def test_official_ppg_v1_keeps_fixed_versions_and_metric_projections_isolated(
             user_id=user.pk,
             channel="ios-cn",
             logical_name="ppg",
+            source_filename="second.csv",
             source=SimpleUploadedFile(
                 "second.csv",
                 synthetic_ppg_csv(heart_rate_hz=1.5).encode("utf-8"),
@@ -1592,8 +1839,16 @@ def test_formal_ppg_quality_rejection_has_no_output_or_metrics(
         assert task.failure_detail["quality"]["details"]["threshold"] == 70
         assert task.result_payload is None
         assert not TaskMetric.objects.filter(task=task).exists()
-        output_root = tmp_path / "tasks" / "outputs" / str(task.pk)
-        assert not tuple(path for path in output_root.rglob("*") if path.is_file())
+        output_root = (
+            tmp_path
+            / "tasks"
+            / task.channel.label
+            / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task.pk)
+        )
+        assert not output_root.exists()
+        assert not output_root.is_symlink()
 
         async def query_failure():
             """通过本人详情接口核对受控质量拒绝文案和明细。"""

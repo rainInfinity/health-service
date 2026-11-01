@@ -36,13 +36,18 @@ _PUBLISHABLE_TEST_KEY = "test.catalog.publisher"
 _PUBLISHABLE_TEST_METRIC = "test.catalog.value"
 
 
-def _create_test_catalog_version(*, code: str = "pulse", params: dict | None = None):
+def _create_test_catalog_version(
+    *,
+    code: str = "pulse",
+    params: dict | None = None,
+    algorithm_key: str = _PUBLISHABLE_TEST_KEY,
+):
     """创建目录发布边界测试使用的未发布版本。"""
     model = create_model(code=code, name="Pulse", description=None)
     return create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key=_PUBLISHABLE_TEST_KEY,
+        algorithm_key=algorithm_key,
         params=params,
     )
 
@@ -82,10 +87,12 @@ def _publishable_test_algorithm() -> AlgorithmDefinition:
         is_example=False,
         required_inputs=(),
         required_artifacts=(),
+        input_extensions={},
+        artifact_extensions={},
         required_profile_fields=(),
         parameter_validator=_validate_test_parameters,
         result_validator=_validate_test_result,
-        runner=_run_test_algorithm,
+        resource_factory=lambda _: _run_test_algorithm,
         metric_contracts=(MetricContract(_PUBLISHABLE_TEST_METRIC, "number", "count"),),
     )
 
@@ -100,44 +107,92 @@ def _required_artifact_algorithm() -> AlgorithmDefinition:
         is_example=False,
         required_inputs=(),
         required_artifacts=("weights",),
+        input_extensions={},
+        artifact_extensions={"weights": frozenset({"bin"})},
         required_profile_fields=(),
         parameter_validator=_validate_test_parameters,
         result_validator=_validate_test_result,
-        runner=_run_test_algorithm,
+        resource_factory=lambda _: _run_test_algorithm,
         metric_contracts=(),
     )
 
 
+register_algorithm(_required_artifact_algorithm())
+
+
 @pytest.mark.django_db
-def test_artifact_upload_registers_complete_file_and_removes_duplicate_orphan(tmp_path):
-    """同版本逻辑名冲突不覆盖已登记文件且清除本次孤儿文件。"""
+def test_artifact_upload_is_version_scoped_and_removes_duplicate_orphan(tmp_path):
+    """同逻辑名跨版本互不覆盖，同版本冲突清除本次孤儿文件。"""
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         MAX_UPLOAD_BYTES=32,
     ):
-        version = _create_test_catalog_version()
+        version = _create_test_catalog_version(
+            algorithm_key="test.catalog.required-artifact",
+        )
         artifact = upload_model_artifact(
             version_id=version.version_id,
             logical_name="weights",
+            source_filename="weights.bin",
             source=BytesIO(b"first artifact"),
         )
         stored_path = tmp_path / "artifacts" / artifact.storage_key
         assert stored_path.read_bytes() == b"first artifact"
         assert artifact.size_bytes == len(b"first artifact")
 
+        other_version = create_model_version(
+            model_id=version.model_id,
+            version="2.0",
+            algorithm_key="test.catalog.required-artifact",
+            params=None,
+        )
+        other_artifact = upload_model_artifact(
+            version_id=other_version.version_id,
+            logical_name="weights",
+            source_filename="weights.bin",
+            source=BytesIO(b"second artifact"),
+        )
+        other_path = tmp_path / "artifacts" / other_artifact.storage_key
+        assert other_path.read_bytes() == b"second artifact"
+        assert stored_path != other_path
+        assert stored_path.relative_to(tmp_path / "artifacts").parts[:2] == (
+            "pulse",
+            "1.0",
+        )
+        assert other_path.relative_to(tmp_path / "artifacts").parts[:2] == (
+            "pulse",
+            "2.0",
+        )
+        assert stored_path.name.startswith("weights-")
+        assert other_path.name.startswith("weights-")
+
+
         with pytest.raises(CatalogConflict):
             upload_model_artifact(
                 version_id=version.version_id,
                 logical_name="weights",
+                source_filename="weights.bin",
                 source=BytesIO(b"duplicate artifact"),
             )
 
         assert ModelArtifact.objects.filter(model_version_id=version.version_id).count() == 1
         assert stored_path.read_bytes() == b"first artifact"
-        assert tuple(path for path in (tmp_path / "artifacts").rglob("*.bin")) == (
+        assert set((tmp_path / "artifacts").rglob("*.bin")) == {
             stored_path,
-        )
+            other_path,
+        }
+        published = publish_model_version(version_id=version.version_id)
+        assert published.published_at is not None
+        with pytest.raises(CatalogConflict):
+            upload_model_artifact(
+                version_id=version.version_id,
+                logical_name="weights",
+                source_filename="weights.bin",
+                source=BytesIO(b"replacement artifact"),
+            )
+        assert stored_path.read_bytes() == b"first artifact"
+        assert ModelArtifact.objects.filter(model_version_id=version.version_id).count() == 1
 
 
 @pytest.mark.django_db
@@ -233,6 +288,7 @@ def test_test_algorithm_version_publishes_without_artifacts_and_is_immutable(tmp
             upload_model_artifact(
                 version_id=version.version_id,
                 logical_name="weights",
+                source_filename="weights.bin",
                 source=BytesIO(b"late artifact"),
             )
 
@@ -294,6 +350,7 @@ def test_publish_requires_exact_artifact_inventory_and_existing_file(tmp_path, m
         artifact = upload_model_artifact(
             version_id=version.version_id,
             logical_name="weights",
+            source_filename="weights.bin",
             source=BytesIO(b"model weights"),
         )
         stored_path = Path(tmp_path / "artifacts" / artifact.storage_key)

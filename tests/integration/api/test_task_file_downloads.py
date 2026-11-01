@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import os
 from collections.abc import Mapping
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -72,10 +74,12 @@ def _create_download_task(tmp_path: Path, *, username: str):
             is_example=False,
             required_inputs=("source",),
             required_artifacts=(),
+            input_extensions={"source": frozenset({"csv"})},
+            artifact_extensions={},
             required_profile_fields=(),
             parameter_validator=_accept_empty_parameters,
             result_validator=_validate_report,
-            runner=_write_report,
+            resource_factory=lambda _: _write_report,
             metric_contracts=(),
         )
     )
@@ -107,18 +111,24 @@ def _create_download_task(tmp_path: Path, *, username: str):
         channel="ios-cn",
         model_id=model.model_id,
     )
-    historical_file = upload_task_input(
+    historical_key = f"uploads/{uuid4().hex}.bin"
+    historical_path = tmp_path / "tasks" / historical_key
+    historical_path.parent.mkdir(parents=True, exist_ok=True)
+    historical_path.write_bytes(b"historical input")
+    historical_file = TaskInputFile.objects.create(
         task_id=task_draft.task_id,
-        user_id=user.pk,
-        channel="ios-cn",
         logical_name="source",
-        source=BytesIO(b"historical input"),
+        storage_key=historical_key,
+        size_bytes=len(b"historical input"),
+        uploaded_at=timezone.now(),
+        is_selected=True,
     )
     current_file = upload_task_input(
         task_id=task_draft.task_id,
         user_id=user.pk,
         channel="ios-cn",
         logical_name="source",
+        source_filename="source.csv",
         source=BytesIO(b"current input"),
     )
 
@@ -194,16 +204,28 @@ def test_download_routes_serve_historical_input_and_real_algorithm_output(tmp_pa
             tmp_path,
             username=f"download-owner-{uuid4().hex}",
         )
+        published_output_dir = (
+            tmp_path
+            / "tasks"
+            / "ios-cn"
+            / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task.pk)
+        )
+        assert published_output_dir.is_symlink()
+        assert published_output_dir.resolve() == output_path.parent.resolve()
+        assert [path.name for path in published_output_dir.iterdir()] == ["report.csv"]
+        assert (published_output_dir / "report.csv").read_bytes() == (b"processed:current input")
+        published_output_dir.unlink()
+        assert not published_output_dir.is_symlink()
 
         async def exercise_api():
             """通过普通渠道令牌请求两类文件并读取流式响应。"""
             client = AsyncClient()
             login = await _login(client, "ios-cn", user.username)
-            headers = {
-                "Authorization": f"Bearer {login.json()['data']['accessToken']}"
-            }
+            headers = {"Authorization": f"Bearer {login.json()['data']['accessToken']}"}
             historical_response = await client.get(
-                f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.file_id}/download",
+                f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.pk}/download",
                 headers=headers,
             )
             current_response = await client.get(
@@ -234,8 +256,8 @@ def test_download_routes_serve_historical_input_and_real_algorithm_output(tmp_pa
                 headers_out,
             )
 
-        historical_status, current_status, output_status, bodies, headers_out = (
-            asyncio.run(exercise_api())
+        historical_status, current_status, output_status, bodies, headers_out = asyncio.run(
+            exercise_api()
         )
 
     assert (historical_status, current_status, output_status) == (200, 200, 200)
@@ -248,6 +270,107 @@ def test_download_routes_serve_historical_input_and_real_algorithm_output(tmp_pa
     assert "application/json" not in headers_out[2]
     assert "attachment" in headers_out[3]
     assert output_path.read_bytes() == b"processed:current input"
+    assert published_output_dir.is_symlink()
+    assert published_output_dir.resolve() == output_path.parent.resolve()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_legacy_success_output_download_uses_database_storage_key(tmp_path: Path) -> None:
+    """旧成功结果即使没有正式目录链接仍由数据库旧键授权下载。"""
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        user, task, _, _, _ = _create_download_task(
+            tmp_path,
+            username=f"download-legacy-{uuid4().hex}",
+        )
+        published_output_dir = (
+            tmp_path
+            / "tasks"
+            / "ios-cn"
+            / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task.pk)
+        )
+        published_output_dir.unlink()
+        legacy_key = f"outputs/{task.pk}/{uuid4().hex}/report.csv"
+        legacy_path = tmp_path / "tasks" / legacy_key
+        legacy_path.parent.mkdir(parents=True)
+        legacy_path.write_bytes(b"historical result")
+        Task.objects.filter(pk=task.pk).update(
+            result_payload={"output_files": {"report": legacy_key}}
+        )
+
+        async def download_output() -> tuple[int, bytes]:
+            """通过成功任务下载接口读取旧数据库键指向的文件。"""
+            client = AsyncClient()
+            login = await _login(client, "ios-cn", user.username)
+            headers = {"Authorization": f"Bearer {login.json()['data']['accessToken']}"}
+            response = await client.get(
+                f"/api/v1/ios-cn/tasks/{task.pk}/outputs/report/download",
+                headers=headers,
+            )
+            body = await _response_body(response)
+            await _close_worker_database_connection()
+            return response.status_code, body
+
+        status, body = asyncio.run(download_output())
+
+    assert status == 200
+    assert body == b"historical result"
+    assert legacy_path.read_bytes() == body
+    assert not published_output_dir.is_symlink()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_output_download_works_when_directory_recovery_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正式目录恢复失败时仍通过数据库实际键下载存在的结果文件。"""
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        user, task, _, _, output_path = _create_download_task(
+            tmp_path,
+            username=f"download-recovery-{uuid4().hex}",
+        )
+        published_output_dir = (
+            tmp_path
+            / "tasks"
+            / "ios-cn"
+            / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task.pk)
+        )
+        published_output_dir.unlink()
+
+        def fail_replace(source: str, destination: str) -> None:
+            raise OSError("PRIVATE-PUBLISH-FAILURE")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+
+        async def download_output() -> tuple[int, bytes]:
+            """通过真实授权下载接口读取成功任务登记的输出键。"""
+            client = AsyncClient()
+            login = await _login(client, "ios-cn", user.username)
+            headers = {"Authorization": f"Bearer {login.json()['data']['accessToken']}"}
+            response = await client.get(
+                f"/api/v1/ios-cn/tasks/{task.pk}/outputs/report/download",
+                headers=headers,
+            )
+            body = await _response_body(response)
+            await _close_worker_database_connection()
+            return response.status_code, body
+
+        status, body = asyncio.run(download_output())
+
+    assert status == 200
+    assert body == b"processed:current input"
+    assert output_path.read_bytes() == body
+    assert not published_output_dir.is_symlink()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -257,7 +380,7 @@ def test_download_routes_hide_unauthorized_missing_and_non_success_files(tmp_pat
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        user, task, historical, _, _ = _create_download_task(
+        user, task, historical, _, successful_output_path = _create_download_task(
             tmp_path,
             username=f"download-owner-{uuid4().hex}",
         )
@@ -298,9 +421,10 @@ def test_download_routes_hide_unauthorized_missing_and_non_success_files(tmp_pat
         (failed_output / "report.csv").write_bytes(b"orphan failure output")
         stale_output = storage.create_execution_output_dir(stale_task.pk, stale_token)
         (stale_output / "report.csv").write_bytes(b"orphan stale output")
-        historical_record = TaskInputFile.objects.get(pk=historical.file_id)
+        historical_record = TaskInputFile.objects.get(pk=historical.pk)
         missing_input = tmp_path / "tasks" / historical_record.storage_key
         missing_input.unlink()
+        successful_output_path.unlink()
 
         async def exercise_api():
             """验证账号、来源渠道、逻辑名和文件存在性边界。"""
@@ -308,20 +432,14 @@ def test_download_routes_hide_unauthorized_missing_and_non_success_files(tmp_pat
             owner_login = await _login(client, "ios-cn", user.username)
             other_login = await _login(client, "ios-cn", other_user.username)
             other_channel_login = await _login(client, "wxapp", user.username)
-            owner_headers = {
-                "Authorization": f"Bearer {owner_login.json()['data']['accessToken']}"
-            }
-            other_headers = {
-                "Authorization": f"Bearer {other_login.json()['data']['accessToken']}"
-            }
+            owner_headers = {"Authorization": f"Bearer {owner_login.json()['data']['accessToken']}"}
+            other_headers = {"Authorization": f"Bearer {other_login.json()['data']['accessToken']}"}
             other_channel_headers = {
-                "Authorization": (
-                    f"Bearer {other_channel_login.json()['data']['accessToken']}"
-                )
+                "Authorization": (f"Bearer {other_channel_login.json()['data']['accessToken']}")
             }
             requests = (
                 await client.get(
-                    f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.file_id}/download",
+                    f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.pk}/download",
                     headers=owner_headers,
                 ),
                 await client.get(
@@ -329,15 +447,19 @@ def test_download_routes_hide_unauthorized_missing_and_non_success_files(tmp_pat
                     headers=owner_headers,
                 ),
                 await client.get(
-                    f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.file_id}/download",
+                    f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.pk}/download",
                     headers=other_headers,
                 ),
                 await client.get(
-                    f"/api/v1/wxapp/tasks/{task.pk}/files/{historical.file_id}/download",
+                    f"/api/v1/wxapp/tasks/{task.pk}/files/{historical.pk}/download",
                     headers=other_channel_headers,
                 ),
                 await client.get(
                     f"/api/v1/ios-cn/tasks/{task.pk}/outputs/unknown/download",
+                    headers=owner_headers,
+                ),
+                await client.get(
+                    f"/api/v1/ios-cn/tasks/{task.pk}/outputs/report/download",
                     headers=owner_headers,
                 ),
                 await client.get(
@@ -356,9 +478,7 @@ def test_download_routes_hide_unauthorized_missing_and_non_success_files(tmp_pat
                     f"/api/v1/ios-cn/tasks/{stale_task.pk}/outputs/report/download",
                     headers=owner_headers,
                 ),
-                await client.get(
-                    f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.file_id}/download"
-                ),
+                await client.get(f"/api/v1/ios-cn/tasks/{task.pk}/files/{historical.pk}/download"),
             )
             await _close_worker_database_connection()
             return requests
@@ -375,11 +495,9 @@ def test_download_routes_hide_unauthorized_missing_and_non_success_files(tmp_pat
         404,
         404,
         404,
+        404,
         401,
     ]
-    assert all(
-        tmp_path.as_posix().encode() not in response.content
-        for response in responses
-    )
+    assert all(tmp_path.as_posix().encode() not in response.content for response in responses)
     assert (failed_output / "report.csv").read_bytes() == b"orphan failure output"
     assert (stale_output / "report.csv").read_bytes() == b"orphan stale output"

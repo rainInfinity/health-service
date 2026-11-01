@@ -136,6 +136,7 @@ async def upload_channel_task_input(
         user_id=request.user.pk,
         channel=channel,
         logical_name=logical_name,
+        source_filename=file.name,
         source=file,
     )
     return success_response(

@@ -19,20 +19,22 @@ from redis.exceptions import RedisError, ResponseError
 from health_service.application.dispatch import dispatch_pending_tasks
 from health_service.application.execution import (
     claim_task_for_execution,
+    publish_successful_task_outputs,
     record_task_execution_failure,
     renew_task_execution_lease,
     save_task_execution_success,
 )
 from health_service.inference_logging import log_inference_event
-from health_service.infrastructure.inference_adapter import run_task_inference
+from health_service.infrastructure.inference_adapter import (
+    clear_version_runtime_cache,
+    run_task_inference,
+)
 from health_service.models import Task
 
 _BATCH_SIZE = 100
 _MAX_TASK_ID = (1 << 63) - 1
 _TERMINAL_STATUSES = frozenset({Task.StatusChoices.SUCCEEDED, Task.StatusChoices.FAILED})
-_EXECUTABLE_STATUSES = frozenset(
-    {Task.StatusChoices.SUBMITTED, Task.StatusChoices.RUNNING}
-)
+_EXECUTABLE_STATUSES = frozenset({Task.StatusChoices.SUBMITTED, Task.StatusChoices.RUNNING})
 
 
 class Command(BaseCommand):
@@ -77,6 +79,7 @@ class Command(BaseCommand):
             self._record_worker_error(error)
             raise CommandError("推理消费者的 Redis 操作失败") from error
         finally:
+            clear_version_runtime_cache()
             self._restore_shutdown_signal_handlers(previous_handlers)
             client.close()
         self._log_event("inference.worker.stopped")
@@ -164,7 +167,9 @@ class Command(BaseCommand):
         """验证消息和任务状态，只有终态已持久化后才确认消息。"""
         task_id = _parse_task_id(fields)
         self._log_event(
-            "inference.message.received", task_id=task_id, message_id=message_id,
+            "inference.message.received",
+            task_id=task_id,
+            message_id=message_id,
         )
         try:
             self._process_message(client, message_id, task_id)
@@ -173,7 +178,10 @@ class Command(BaseCommand):
             raise
 
     def _process_message(
-        self, client: Redis, message_id: str, task_id: int | None,
+        self,
+        client: Redis,
+        message_id: str,
+        task_id: int | None,
     ) -> None:
         """按执行所有权处理一条消息，终态提交后才报告并确认。"""
         if task_id is None:
@@ -182,6 +190,8 @@ class Command(BaseCommand):
 
         status = _task_status(task_id)
         if status is None or status in _TERMINAL_STATUSES:
+            if status == Task.StatusChoices.SUCCEEDED:
+                publish_successful_task_outputs(task_id=task_id)
             self._ack(client, message_id)
             return
         if status not in _EXECUTABLE_STATUSES:
@@ -204,7 +214,9 @@ class Command(BaseCommand):
             name=f"inference-lease-{task_id}",
             daemon=True,
             kwargs={
-                "consumer": self._consumer, "mode": self._mode, "message_id": message_id,
+                "consumer": self._consumer,
+                "mode": self._mode,
+                "message_id": message_id,
             },
         )
         heartbeat_thread.start()
@@ -240,7 +252,9 @@ class Command(BaseCommand):
             terminal = failure_code is not None
         elif result is None:
             self._log_event(
-                "inference.task.lease_lost", task_id=task_id, message_id=message_id,
+                "inference.task.lease_lost",
+                task_id=task_id,
+                message_id=message_id,
                 reason="ownership_rejected",
             )
             return
@@ -271,13 +285,17 @@ class Command(BaseCommand):
         if terminal:
             self._log_event(
                 "inference.task.failed" if failure_code else "inference.task.succeeded",
-                task_id=task_id, message_id=message_id, error_code=failure_code,
+                task_id=task_id,
+                message_id=message_id,
+                error_code=failure_code,
                 duration_ms=(monotonic() - started_at) * 1000,
             )
             self._ack(client, message_id)
         else:
             self._log_event(
-                "inference.task.lease_lost", task_id=task_id, message_id=message_id,
+                "inference.task.lease_lost",
+                task_id=task_id,
+                message_id=message_id,
                 reason="ownership_rejected",
             )
 
@@ -306,11 +324,7 @@ def _parse_task_id(fields: object) -> int | None:
     if not isinstance(fields, Mapping):
         return None
     raw_task_id = fields.get("task_id")
-    if (
-        not isinstance(raw_task_id, str)
-        or not raw_task_id.isascii()
-        or not raw_task_id.isdigit()
-    ):
+    if not isinstance(raw_task_id, str) or not raw_task_id.isascii() or not raw_task_id.isdigit():
         return None
     try:
         task_id = int(raw_task_id)
@@ -350,16 +364,22 @@ def _renew_execution_lease(
             ):
                 lease_lost.set()
                 log_inference_event(
-                    "inference.task.lease_lost", task_id=task_id,
-                    consumer=consumer, mode=mode, message_id=message_id,
+                    "inference.task.lease_lost",
+                    task_id=task_id,
+                    consumer=consumer,
+                    mode=mode,
+                    message_id=message_id,
                     reason="lease_expired",
                 )
                 return
     except Exception as error:  # noqa: BLE001  # 任意心跳故障都必须放弃终态写入。
         lease_lost.set()
         log_inference_event(
-            "inference.task.lease_lost", task_id=task_id,
-            consumer=consumer, mode=mode, message_id=message_id,
+            "inference.task.lease_lost",
+            task_id=task_id,
+            consumer=consumer,
+            mode=mode,
+            message_id=message_id,
             reason="heartbeat_error",
             exception_type="DatabaseError" if isinstance(error, DatabaseError) else None,
         )
@@ -369,7 +389,10 @@ def _renew_execution_lease(
         except Exception:  # noqa: BLE001  # 线程连接无法清理时保守放弃提交。
             lease_lost.set()
             log_inference_event(
-                "inference.task.lease_lost", task_id=task_id,
-                consumer=consumer, mode=mode, message_id=message_id,
+                "inference.task.lease_lost",
+                task_id=task_id,
+                consumer=consumer,
+                mode=mode,
+                message_id=message_id,
                 reason="connection_cleanup_failed",
             )

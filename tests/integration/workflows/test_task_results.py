@@ -1,13 +1,16 @@
 """验证任务成功结果与指标投影的租约及事务边界。"""
 
 import math
+import os
 from collections.abc import Mapping
 from datetime import timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.test import override_settings
 from django.utils import timezone
@@ -32,6 +35,7 @@ from health_service.application.catalog import (
 )
 from health_service.application.execution import (
     claim_task_for_execution,
+    publish_successful_task_outputs,
     record_task_execution_failure,
     save_task_execution_success,
 )
@@ -56,7 +60,7 @@ def _accept_result(_: InferenceOutput) -> None:
     """接受由用例单独检查的测试结果。"""
 
 
-def _unused_runner(_: InferenceInput) -> InferenceOutput:
+def _unused_executor(_: InferenceInput) -> InferenceOutput:
     """阻止结果持久化测试意外执行算法。"""
     raise AssertionError("结果测试不应执行算法")
 
@@ -85,10 +89,12 @@ def _create_running_task() -> tuple[Task, UUID, dict[str, str], dict[str, int]]:
             is_example=False,
             required_inputs=(),
             required_artifacts=(),
+            input_extensions={},
+            artifact_extensions={},
             required_profile_fields=(),
             parameter_validator=_accept_empty_parameters,
             result_validator=_accept_result,
-            runner=_unused_runner,
+            resource_factory=lambda _: _unused_executor,
             metric_contracts=contracts,
         )
     )
@@ -160,15 +166,124 @@ def test_success_commits_result_and_only_returned_selected_metrics():
     assert task.execution_token is None
     assert task.lease_expires_at is None
     assert task.failure_code is None
-    projections = {
-        item.metric_id: item
-        for item in TaskMetric.objects.filter(task=task)
-    }
+    projections = {item.metric_id: item for item in TaskMetric.objects.filter(task=task)}
     assert set(projections) == {metric_ids["count"], metric_ids["enabled"]}
     assert projections[metric_ids["count"]].numeric_value == 0.0
     assert projections[metric_ids["count"]].boolean_value is None
     assert projections[metric_ids["enabled"]].numeric_value is None
     assert projections[metric_ids["enabled"]].boolean_value is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_output_republication_uses_current_database_result(tmp_path: Path) -> None:
+    """迟到发布只能切换到数据库当前成功结果所登记的执行目录。"""
+    task, _, _, _ = _create_running_task()
+    storage = LocalFileStorage(tmp_path / "tasks", tmp_path / "artifacts")
+    old_token = uuid4()
+    old_dir = storage.create_execution_output_dir(task.pk, old_token)
+    old_output = old_dir / "report.csv"
+    old_output.write_bytes(b"older result")
+    old_key = storage.validate_output_file(task.pk, old_token, old_output)
+    latest_token = uuid4()
+    latest_dir = storage.create_execution_output_dir(task.pk, latest_token)
+    latest_output = latest_dir / "report.csv"
+    latest_output.write_bytes(b"database-authoritative result")
+    latest_key = storage.validate_output_file(
+        task.pk,
+        latest_token,
+        latest_output,
+    )
+
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        assert storage.publish_task_output_directory(
+            channel=task.channel.label,
+            created_at=task.created_at,
+            task_id=task.pk,
+            output_storage_keys={"report": old_key},
+        )
+        Task.objects.filter(pk=task.pk).update(
+            status=Task.StatusChoices.SUCCEEDED,
+            result_payload={"output_files": {"report": latest_key}},
+            finished_at=timezone.now(),
+            execution_token=None,
+            lease_expires_at=None,
+        )
+
+        assert publish_successful_task_outputs(task_id=task.pk)
+
+    published_dir = (
+        tmp_path
+        / "tasks"
+        / task.channel.label
+        / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+        / "outputs"
+        / str(task.pk)
+    )
+    assert published_dir.is_symlink()
+    assert published_dir.resolve() == latest_dir.resolve()
+    assert (published_dir / "report.csv").read_bytes() == (b"database-authoritative result")
+    assert old_dir.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_output_publish_failure_keeps_success_and_can_be_recovered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """结果目录替换失败不回滚成功记录，安全重试可按数据库键恢复。"""
+    task, token, _, _ = _create_running_task()
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        storage = LocalFileStorage(tmp_path / "tasks", tmp_path / "artifacts")
+        execution_dir = storage.create_execution_output_dir(task.pk, token)
+        output = execution_dir / "report.csv"
+        output.write_bytes(b"saved result")
+        output_key = storage.validate_output_file(task.pk, token, output)
+
+        def fail_replace(source: str, destination: str) -> None:
+            raise OSError("PRIVATE-FILESYSTEM-DETAIL")
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(os, "replace", fail_replace)
+            assert save_task_execution_success(
+                task_id=task.pk,
+                execution_token=token,
+                result=PreparedInferenceResult(
+                    payload={"summary": "saved"},
+                    metrics={},
+                    output_files={"report": output_key},
+                ),
+            )
+        log_output = capsys.readouterr().out
+        task.refresh_from_db()
+        assert task.status == Task.StatusChoices.SUCCEEDED
+        assert task.result_payload == {
+            "summary": "saved",
+            "output_files": {"report": output_key},
+        }
+        assert (
+            f"event=inference.output.publish_failed taskId={task.pk} reason=output_publish_failed"
+        ) in log_output
+        assert "PRIVATE-FILESYSTEM-DETAIL" not in log_output
+
+        published_dir = (
+            tmp_path
+            / "tasks"
+            / task.channel.label
+            / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            / "outputs"
+            / str(task.pk)
+        )
+        assert not published_dir.is_symlink()
+        assert publish_successful_task_outputs(task_id=task.pk)
+        assert published_dir.resolve() == execution_dir.resolve()
+        assert (published_dir / "report.csv").read_bytes() == b"saved result"
 
 
 @pytest.mark.parametrize(
@@ -194,10 +309,7 @@ def test_success_commits_result_and_only_returned_selected_metrics():
 def test_invalid_result_is_rejected_without_changing_running_task(payload, metric_values):
     """违反结果类型或 JSON 契约时不写终态和任何指标。"""
     task, token, codes, _ = _create_running_task()
-    metrics = {
-        codes.get(name, name): value
-        for name, value in metric_values.items()
-    }
+    metrics = {codes.get(name, name): value for name, value in metric_values.items()}
 
     with pytest.raises(InferenceError) as error:
         save_task_execution_success(
@@ -308,17 +420,18 @@ def test_metric_constraint_failure_rolls_back_success_transition():
     ),
 )
 @pytest.mark.django_db(transaction=True)
-def test_failure_persists_safe_code_without_private_diagnostics(
-    error, expected_code, private_text
-):
+def test_failure_persists_safe_code_without_private_diagnostics(error, expected_code, private_text):
     """失败终态只保存受控代码，不保留异常正文或任意明细。"""
     task, token, _, _ = _create_running_task()
 
-    assert record_task_execution_failure(
-        task_id=task.pk,
-        execution_token=token,
-        error=error,
-    ) == expected_code
+    assert (
+        record_task_execution_failure(
+            task_id=task.pk,
+            execution_token=token,
+            error=error,
+        )
+        == expected_code
+    )
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
@@ -370,11 +483,14 @@ def test_quality_rejection_commits_whitelisted_failure_terminal(
     error.args = ("PRIVATE-QUALITY-SENTINEL",)
     error.safe_message = "PRIVATE-QUALITY-SENTINEL"
 
-    assert record_task_execution_failure(
-        task_id=task.pk,
-        execution_token=token,
-        error=error,
-    ) == "INFERENCE.QUALITY_REJECTED"
+    assert (
+        record_task_execution_failure(
+            task_id=task.pk,
+            execution_token=token,
+            error=error,
+        )
+        == "INFERENCE.QUALITY_REJECTED"
+    )
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
@@ -387,6 +503,7 @@ def test_quality_rejection_commits_whitelisted_failure_terminal(
     assert task.lease_expires_at is None
     assert task.result_payload is None
     assert not TaskMetric.objects.filter(task=task).exists()
+
 
 @pytest.mark.parametrize("corruption", ["unknown-reason", "invalid-score"])
 @pytest.mark.django_db(transaction=True)
@@ -411,11 +528,14 @@ def test_corrupt_quality_rejection_is_generic_failure(corruption: str):
     error.args = ("PRIVATE-CORRUPT-QUALITY-SENTINEL",)
     error.safe_message = "PRIVATE-CORRUPT-QUALITY-SENTINEL"
 
-    assert record_task_execution_failure(
-        task_id=task.pk,
-        execution_token=token,
-        error=error,
-    ) == "INFERENCE.EXECUTION_ERROR"
+    assert (
+        record_task_execution_failure(
+            task_id=task.pk,
+            execution_token=token,
+            error=error,
+        )
+        == "INFERENCE.EXECUTION_ERROR"
+    )
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.FAILED
@@ -423,7 +543,6 @@ def test_corrupt_quality_rejection_is_generic_failure(corruption: str):
     assert task.failure_message is not None
     assert "PRIVATE-CORRUPT-QUALITY-SENTINEL" not in task.failure_message
     assert task.failure_detail is None
-
 
 
 @pytest.mark.django_db(transaction=True)
@@ -476,16 +595,19 @@ def test_stale_or_expired_execution_cannot_commit_failure(stale_kind):
             lease_expires_at=timezone.now() - timedelta(seconds=1)
         )
 
-    assert record_task_execution_failure(
-        task_id=task.pk,
-        execution_token=supplied_token,
-        error=QualityRejectedError(
-            QualityRejection(
-                QualityRejectionReason.LOW_SCORE,
-                LowScoreDetails(40, 70),
-            )
-        ),
-    ) is None
+    assert (
+        record_task_execution_failure(
+            task_id=task.pk,
+            execution_token=supplied_token,
+            error=QualityRejectedError(
+                QualityRejection(
+                    QualityRejectionReason.LOW_SCORE,
+                    LowScoreDetails(40, 70),
+                )
+            ),
+        )
+        is None
+    )
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.RUNNING
@@ -502,9 +624,7 @@ def test_stale_or_expired_execution_cannot_commit_failure(stale_kind):
 def test_old_execution_failure_cannot_overwrite_reclaimed_success():
     """旧令牌的迟到失败不能覆盖新执行已提交的成功结果。"""
     task, old_token, _, _ = _create_running_task()
-    Task.objects.filter(pk=task.pk).update(
-        lease_expires_at=timezone.now() - timedelta(seconds=1)
-    )
+    Task.objects.filter(pk=task.pk).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
     new_token = claim_task_for_execution(task_id=task.pk)
     assert new_token is not None and new_token != old_token
     assert save_task_execution_success(
@@ -517,16 +637,19 @@ def test_old_execution_failure_cannot_overwrite_reclaimed_success():
         ),
     )
 
-    assert record_task_execution_failure(
-        task_id=task.pk,
-        execution_token=old_token,
-        error=QualityRejectedError(
-            QualityRejection(
-                QualityRejectionReason.NO_VALID_SIGNAL,
-                None,
-            )
-        ),
-    ) is None
+    assert (
+        record_task_execution_failure(
+            task_id=task.pk,
+            execution_token=old_token,
+            error=QualityRejectedError(
+                QualityRejection(
+                    QualityRejectionReason.NO_VALID_SIGNAL,
+                    None,
+                )
+            ),
+        )
+        is None
+    )
 
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.SUCCEEDED
@@ -538,9 +661,7 @@ def test_old_execution_failure_cannot_overwrite_reclaimed_success():
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "expired"])
 @pytest.mark.django_db(transaction=True)
-def test_output_file_is_authoritative_only_after_valid_success_commit(
-    tmp_path, outcome
-):
+def test_output_file_is_authoritative_only_after_valid_success_commit(tmp_path, outcome):
     """仅当前有效执行的成功事务能把专属输出登记为权威结果。"""
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
@@ -568,16 +689,19 @@ def test_output_file_is_authoritative_only_after_valid_success_commit(
                 result=result,
             )
         elif outcome == "failure":
-            assert record_task_execution_failure(
-                task_id=task.pk,
-                execution_token=token,
-                error=QualityRejectedError(
-                    QualityRejection(
-                        QualityRejectionReason.LOW_SCORE,
-                        LowScoreDetails(40, 70),
-                    )
-                ),
-            ) == "INFERENCE.QUALITY_REJECTED"
+            assert (
+                record_task_execution_failure(
+                    task_id=task.pk,
+                    execution_token=token,
+                    error=QualityRejectedError(
+                        QualityRejection(
+                            QualityRejectionReason.LOW_SCORE,
+                            LowScoreDetails(40, 70),
+                        )
+                    ),
+                )
+                == "INFERENCE.QUALITY_REJECTED"
+            )
         else:
             Task.objects.filter(pk=task.pk).update(
                 lease_expires_at=timezone.now() - timedelta(seconds=1)
@@ -590,16 +714,62 @@ def test_output_file_is_authoritative_only_after_valid_success_commit(
 
     task.refresh_from_db()
     assert output_file.read_text(encoding="utf-8") == "status\ncompleted\n"
+    published_dir = (
+        storage.task_data_root
+        / task.channel.label
+        / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+        / "outputs"
+        / str(task.pk)
+    )
     if outcome == "success":
         assert task.status == Task.StatusChoices.SUCCEEDED
         assert task.result_payload == {
             "ok": True,
             "output_files": {"diagnostic": storage_key},
         }
+        assert published_dir.is_symlink()
+        assert published_dir.resolve() == output_dir.resolve()
     else:
         assert task.status == (
-            Task.StatusChoices.FAILED
-            if outcome == "failure"
-            else Task.StatusChoices.RUNNING
+            Task.StatusChoices.FAILED if outcome == "failure" else Task.StatusChoices.RUNNING
         )
         assert task.result_payload is None
+        assert not published_dir.is_symlink()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_rolled_back_success_does_not_publish_output_directory(tmp_path: Path) -> None:
+    """外层事务回滚时不执行已登记的正式目录发布回调。"""
+    task, token, codes, _ = _create_running_task()
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        storage = LocalFileStorage(tmp_path / "tasks", tmp_path / "artifacts")
+        execution_dir = storage.create_execution_output_dir(task.pk, token)
+        output_file = execution_dir / "result.csv"
+        output_file.write_text("uncommitted result", encoding="utf-8")
+        output_key = storage.validate_output_file(task.pk, token, output_file)
+        with pytest.raises(RuntimeError, match="rollback"), transaction.atomic():
+            assert save_task_execution_success(
+                task_id=task.pk,
+                execution_token=token,
+                result=PreparedInferenceResult(
+                    payload={"ok": True},
+                    metrics={codes["count"]: 1},
+                    output_files={"diagnostic": output_key},
+                ),
+            )
+            raise RuntimeError("rollback")
+
+    task.refresh_from_db()
+    assert task.status == Task.StatusChoices.RUNNING
+    assert task.result_payload is None
+    published_dir = (
+        storage.task_data_root
+        / task.channel.label
+        / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+        / "outputs"
+        / str(task.pk)
+    )
+    assert not published_dir.is_symlink()

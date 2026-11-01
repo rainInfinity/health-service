@@ -9,9 +9,10 @@ from uuid import UUID
 
 from django.conf import settings
 from health_inference import (
-    AlgorithmDefinition,
+    AlgorithmRuntime,
     InferenceError,
     InferenceInput,
+    VersionResources,
     get_algorithm,
 )
 
@@ -27,16 +28,14 @@ from health_service.schemas.internal.execution import PreparedInferenceResult
 
 @dataclass(frozen=True, slots=True)
 class _VersionRuntime:
-    """缓存已发布版本的受控执行器、固定参数和制品存储键。"""
+    """缓存绑定到一个已发布版本的算法和模型资源。"""
 
-    algorithm: AlgorithmDefinition  # 代码显式注册的固定算法契约。
-    params: Mapping[str, object]  # 已发布版本不可变参数。
-    artifact_storage_keys: Mapping[str, str]  # 制品逻辑名到相对存储键。
+    algorithm_runtime: AlgorithmRuntime  # 固定参数、模型路径及可复用执行器。
 
 
 @cache
 def _version_runtime(version_id: int) -> _VersionRuntime:
-    """按固定版本主键加载一次纯元数据，不读取渠道当前选择。"""
+    """按固定版本主键加载并缓存算法运行时，不读取渠道当前选择。"""
     version = catalog_persistence.get_model_version(version_id=version_id)
     if version is None or version.published_at is None:
         raise InferenceError("TASK.INVALID_VERSION", "模型版本不可用")
@@ -47,20 +46,23 @@ def _version_runtime(version_id: int) -> _VersionRuntime:
         params = deepcopy(dict(version.params))
     else:
         raise InferenceError("INFERENCE.INVALID_PARAMETERS", "模型参数无效")
-    try:
-        algorithm.validate_params(params)
-    except (TypeError, ValueError) as error:
-        raise InferenceError("INFERENCE.INVALID_PARAMETERS", "模型参数无效") from error
 
     artifacts = catalog_persistence.list_model_artifacts(version_id=version_id)
     artifact_storage_keys = {artifact.logical_name: artifact.storage_key for artifact in artifacts}
     if set(artifact_storage_keys) != set(algorithm.required_artifacts):
         raise InferenceError("INFERENCE.INVALID_ARTIFACT", "模型制品配置无效")
-    return _VersionRuntime(
-        algorithm=algorithm,
-        params=params,
-        artifact_storage_keys=artifact_storage_keys,
+    storage = _task_storage()
+    try:
+        artifact_paths = {
+            logical_name: storage.resolve_file(StorageArea.MODEL_ARTIFACT, storage_key)
+            for logical_name, storage_key in artifact_storage_keys.items()
+        }
+    except StorageError as error:
+        raise InferenceError("INFERENCE.INVALID_ARTIFACT", "模型制品不可用") from error
+    algorithm_runtime = algorithm.create_runtime(
+        VersionResources(params=params, artifact_paths=artifact_paths)
     )
+    return _VersionRuntime(algorithm_runtime=algorithm_runtime)
 
 
 def clear_version_runtime_cache() -> None:
@@ -90,17 +92,13 @@ def run_task_inference(*, task_id: int, execution_token: UUID) -> PreparedInfere
         if not isinstance(client_metadata, Mapping):
             raise InferenceError("INFERENCE.INVALID_INPUT", "客户端元数据无效")
         client_metadata = deepcopy(dict(client_metadata))
-    if any(profile.get(field) is None for field in runtime.algorithm.required_profile_fields):
+    algorithm = runtime.algorithm_runtime.definition
+    if any(profile.get(field) is None for field in algorithm.required_profile_fields):
         raise InferenceError("INFERENCE.MISSING_PROFILE", "计算所需资料缺失")
 
-    missing_inputs = set(runtime.algorithm.required_inputs) - set(context.input_storage_keys)
+    missing_inputs = set(algorithm.required_inputs) - set(context.input_storage_keys)
     if missing_inputs:
         raise InferenceError("INFERENCE.INVALID_INPUT", "缺少算法所需输入文件")
-    missing_artifacts = set(runtime.algorithm.required_artifacts) - set(
-        runtime.artifact_storage_keys
-    )
-    if missing_artifacts:
-        raise InferenceError("INFERENCE.INVALID_ARTIFACT", "缺少算法所需模型制品")
 
     storage = _task_storage()
     try:
@@ -109,20 +107,10 @@ def run_task_inference(*, task_id: int, execution_token: UUID) -> PreparedInfere
                 StorageArea.TASK_DATA,
                 context.input_storage_keys[logical_name],
             )
-            for logical_name in runtime.algorithm.required_inputs
+            for logical_name in algorithm.required_inputs
         }
     except StorageError as error:
         raise InferenceError("INFERENCE.INVALID_INPUT", "任务输入文件不可用") from error
-    try:
-        artifacts = {
-            logical_name: storage.resolve_file(
-                StorageArea.MODEL_ARTIFACT,
-                runtime.artifact_storage_keys[logical_name],
-            )
-            for logical_name in runtime.algorithm.required_artifacts
-        }
-    except StorageError as error:
-        raise InferenceError("INFERENCE.INVALID_ARTIFACT", "模型制品不可用") from error
 
     try:
         output_dir = storage.create_execution_output_dir(task_id, execution_token)
@@ -131,13 +119,13 @@ def run_task_inference(*, task_id: int, execution_token: UUID) -> PreparedInfere
 
     inference_input = InferenceInput(
         files=files,
-        artifacts=artifacts,
+        artifacts=dict(runtime.algorithm_runtime.resources.artifact_paths),
         profile=profile,
-        params=deepcopy(dict(runtime.params)),
+        params=deepcopy(dict(runtime.algorithm_runtime.resources.params)),
         output_dir=output_dir,
         client_metadata=client_metadata,
     )
-    output = runtime.algorithm.run(inference_input)
+    output = runtime.algorithm_runtime.run(inference_input)
     if "output_files" in output.payload:
         raise InferenceError("RESULT.INVALID_OUTPUT", "算法结果格式无效")
 

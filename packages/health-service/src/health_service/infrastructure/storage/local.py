@@ -1,14 +1,20 @@
 """提供任务数据和模型制品的受保护本地文件存储。"""
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 _CHUNK_SIZE = 64 * 1024
+_SAFE_PATH_SEGMENT_BYTES = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._"
+)
+_SAFE_CHANNEL_SEGMENT_BYTES = _SAFE_PATH_SEGMENT_BYTES | {ord("-")}
 
 
 class StorageArea(StrEnum):
@@ -34,6 +40,10 @@ class InvalidStorageKey(StorageError):
     """表示存储键非法或试图逃逸根目录。"""
 
 
+class InvalidStorageName(StorageError):
+    """表示路径元数据无效或编码后的名称超出文件系统限制。"""
+
+
 class StorageFileNotFound(StorageError):
     """表示授权存储键对应的文件不存在。"""
 
@@ -44,6 +54,10 @@ class EmptyUploadError(StorageError):
 
 class UploadTooLargeError(StorageError):
     """表示上传内容超过配置大小上限。"""
+
+
+class InvalidUploadExtension(StorageError):
+    """表示上传文件名后缀缺失或不符合算法格式契约。"""
 
 
 class InvalidOutputFile(StorageError):
@@ -61,6 +75,136 @@ class LocalFileStorage:
         """创建并验证任务数据根目录与模型制品根目录。"""
         self.task_data_root = self._prepare_root(task_data_root)
         self.model_artifact_root = self._prepare_root(model_artifact_root)
+
+    @staticmethod
+    def _encode_path_segment(value: str, *, allow_hyphen: bool = False) -> str:
+        """按 UTF-8 字节进行唯一可逆编码，避免元数据形成路径分隔符。"""
+        if not isinstance(value, str) or not value:
+            raise InvalidStorageName("文件存储名称无效")
+        try:
+            value_bytes = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise InvalidStorageName("文件存储名称无效") from error
+        if value in {".", ".."}:
+            return "%2E" * len(value)
+        safe_bytes = _SAFE_CHANNEL_SEGMENT_BYTES if allow_hyphen else _SAFE_PATH_SEGMENT_BYTES
+        return "".join(chr(byte) if byte in safe_bytes else f"%{byte:02X}" for byte in value_bytes)
+
+    @staticmethod
+    def _validate_component_lengths(root: Path, components: tuple[str, ...]) -> None:
+        """按当前文件系统的名称上限拒绝过长路径片段，不截断元数据。"""
+        try:
+            name_max = os.pathconf(root, "PC_NAME_MAX")
+        except (OSError, ValueError) as error:
+            raise StorageError("文件存储目录不可用") from error
+        if isinstance(name_max, bool) or not isinstance(name_max, int) or name_max <= 0:
+            raise StorageError("文件存储目录不可用")
+        for component in components:
+            try:
+                component_size = len(component.encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise InvalidStorageName("文件存储名称无效") from error
+            if (
+                component in {"", ".", ".."}
+                or "/" in component
+                or "\\" in component
+                or component_size > name_max
+            ):
+                raise InvalidStorageName("文件存储名称无效")
+
+    @staticmethod
+    def _task_date_parts(created_at: datetime) -> tuple[str, str]:
+        """将带时区的任务创建时间一次转换为上海日期和文件名前缀。"""
+        if not isinstance(created_at, datetime):
+            raise InvalidStorageName("文件存储名称无效")
+        try:
+            if created_at.utcoffset() is None:
+                raise InvalidStorageName("文件存储名称无效")
+            local_created_at = created_at.astimezone(ZoneInfo("Asia/Shanghai"))
+        except (KeyError, OverflowError, ValueError) as error:
+            raise InvalidStorageName("文件存储名称无效") from error
+        return (
+            local_created_at.strftime("%Y%m%d"),
+            local_created_at.strftime("%Y%m%d_%H%M%S"),
+        )
+
+    def save_task_input(
+        self,
+        source: BinaryIO | object,
+        *,
+        source_filename: str,
+        allowed_extensions: frozenset[str],
+        created_at: datetime,
+        task_id: int,
+        user_id: int,
+        channel: str,
+        algorithm_key: str,
+        logical_name: str,
+        max_bytes: int,
+    ) -> StoredFile:
+        """按任务创建时间、归属和算法契约保存具有真实后缀的输入。"""
+        extension = self._validate_upload_extension(
+            source_filename,
+            allowed_extensions,
+        )
+        if (
+            isinstance(task_id, bool)
+            or not isinstance(task_id, int)
+            or task_id <= 0
+            or isinstance(user_id, bool)
+            or not isinstance(user_id, int)
+            or user_id <= 0
+            or not isinstance(created_at, datetime)
+        ):
+            raise InvalidStorageName("文件存储名称无效")
+        date_part, timestamp_part = self._task_date_parts(created_at)
+        channel_part = self._encode_path_segment(channel, allow_hyphen=True)
+        algorithm_part = self._encode_path_segment(algorithm_key)
+        logical_name_part = self._encode_path_segment(logical_name)
+        filename = (
+            f"{timestamp_part}-{task_id}-{user_id}-{algorithm_part}-"
+            f"{logical_name_part}-{uuid4().hex}.{extension}"
+        )
+        components = (channel_part, date_part, filename)
+        root = self.task_data_root
+        self._validate_component_lengths(root, components)
+        candidate = root.joinpath(*components)
+        return self._save_upload(
+            source,
+            area=StorageArea.TASK_DATA,
+            candidate=candidate,
+            max_bytes=max_bytes,
+        )
+
+    def save_model_artifact(
+        self,
+        source: BinaryIO | object,
+        *,
+        source_filename: str,
+        allowed_extensions: frozenset[str],
+        model_code: str,
+        version: str,
+        logical_name: str,
+        max_bytes: int,
+    ) -> StoredFile:
+        """按稳定模型编码、版本和逻辑名保存具有真实后缀的制品。"""
+        extension = self._validate_upload_extension(
+            source_filename,
+            allowed_extensions,
+        )
+        components = (
+            self._encode_path_segment(model_code),
+            self._encode_path_segment(version),
+            f"{self._encode_path_segment(logical_name)}-{uuid4().hex}.{extension}",
+        )
+        root = self.model_artifact_root
+        self._validate_component_lengths(root, components)
+        return self._save_upload(
+            source,
+            area=StorageArea.MODEL_ARTIFACT,
+            candidate=root.joinpath(*components),
+            max_bytes=max_bytes,
+        )
 
     @staticmethod
     def _prepare_root(root: Path) -> Path:
@@ -121,18 +265,32 @@ class LocalFileStorage:
             raise StorageFileNotFound("文件不存在")
         return resolved.relative_to(root).as_posix()
 
-    def save_upload(
+    @staticmethod
+    def _validate_upload_extension(
+        source_filename: str,
+        allowed_extensions: frozenset[str],
+    ) -> str:
+        """只提取并校验客户端文件名后缀，不使用其路径部分。"""
+        if not isinstance(source_filename, str) or not source_filename:
+            raise InvalidUploadExtension("上传文件格式无效")
+        suffix = PureWindowsPath(source_filename).suffix
+        extension = suffix[1:].lower() if suffix.startswith(".") else ""
+        if not extension or extension not in allowed_extensions:
+            raise InvalidUploadExtension("上传文件格式无效")
+        return extension
+
+    def _save_upload(
         self,
         source: BinaryIO | object,
         *,
         area: StorageArea,
+        candidate: Path,
         max_bytes: int,
     ) -> StoredFile:
-        """分块保存上传内容；失败时只删除本次新建文件。"""
+        """在根目录内独占分块写入，并在失败时删除本次文件。"""
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
             raise StorageError("上传大小配置无效")
         root = self._root_for(area)
-        candidate = root / "uploads" / f"{uuid4().hex}.bin"
         created_path: Path | None = None
         size_bytes = 0
         try:
@@ -218,7 +376,7 @@ class LocalFileStorage:
         ):
             raise InvalidOutputFile("执行输出目录无效")
         root = self.task_data_root
-        candidate = root / "outputs" / str(task_id) / execution_token.hex
+        candidate = root / ".executions" / str(task_id) / execution_token.hex
         try:
             self._contained_path(root, candidate.parent, strict=False)
             candidate.parent.mkdir(parents=True, exist_ok=True)
@@ -249,7 +407,7 @@ class LocalFileStorage:
         ):
             raise InvalidOutputFile("执行输出文件无效")
         root = self.task_data_root
-        execution_dir = root / "outputs" / str(task_id) / execution_token.hex
+        execution_dir = root / ".executions" / str(task_id) / execution_token.hex
         try:
             resolved_dir = self._contained_path(root, execution_dir, strict=True)
             resolved_file = self._contained_path(root, Path(output_path), strict=True)
@@ -259,3 +417,128 @@ class LocalFileStorage:
         if not resolved_dir.is_dir() or not resolved_file.is_file():
             raise InvalidOutputFile("执行输出文件无效")
         return resolved_file.relative_to(root).as_posix()
+
+    def publish_task_output_directory(
+        self,
+        *,
+        channel: str,
+        created_at: datetime,
+        task_id: int,
+        output_storage_keys: Mapping[str, str],
+    ) -> bool:
+        """原子切换正式结果链接；旧布局和空结果保持只读、不发布。"""
+        if (
+            isinstance(task_id, bool)
+            or not isinstance(task_id, int)
+            or task_id <= 0
+            or not isinstance(output_storage_keys, Mapping)
+        ):
+            raise InvalidOutputFile("正式结果目录无效")
+        if not output_storage_keys:
+            return False
+
+        task_id_part = str(task_id)
+        execution_token: str | None = None
+        storage_keys: list[str] = []
+        for logical_name, storage_key in output_storage_keys.items():
+            if (
+                not isinstance(logical_name, str)
+                or not logical_name
+                or not isinstance(storage_key, str)
+                or not storage_key
+            ):
+                raise InvalidOutputFile("正式结果目录无效")
+            parts = self._safe_parts(storage_key)
+            if parts[0] != ".executions":
+                return False
+            if len(parts) < 4 or parts[1] != task_id_part:
+                raise InvalidOutputFile("正式结果目录无效")
+            token = parts[2]
+            if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+                raise InvalidOutputFile("正式结果目录无效")
+            try:
+                if UUID(hex=token).hex != token:
+                    raise InvalidOutputFile("正式结果目录无效")
+            except ValueError as error:
+                raise InvalidOutputFile("正式结果目录无效") from error
+            if execution_token is not None and execution_token != token:
+                raise InvalidOutputFile("正式结果目录无效")
+            execution_token = token
+            storage_keys.append(storage_key)
+
+        if execution_token is None:
+            return False
+        root = self.task_data_root
+        execution_candidate = root / ".executions" / task_id_part / execution_token
+        temporary_path: Path | None = None
+        temporary_created = False
+        try:
+            execution_dir = self._contained_path(
+                root,
+                execution_candidate,
+                strict=True,
+            )
+            if execution_dir != execution_candidate or not execution_dir.is_dir():
+                raise InvalidOutputFile("正式结果目录无效")
+            for storage_key in storage_keys:
+                output_file = self.resolve_file(StorageArea.TASK_DATA, storage_key)
+                output_file.relative_to(execution_dir)
+
+            date_part, _ = self._task_date_parts(created_at)
+            channel_part = self._encode_path_segment(channel, allow_hyphen=True)
+            output_parent = root / channel_part / date_part / "outputs"
+            self._validate_component_lengths(
+                root,
+                (channel_part, date_part, "outputs", task_id_part),
+            )
+            resolved_parent = self._contained_path(
+                root,
+                output_parent,
+                strict=False,
+            )
+            if resolved_parent != output_parent:
+                raise InvalidStorageKey("正式结果目录无效")
+            output_parent.mkdir(parents=True, exist_ok=True)
+            resolved_parent = self._contained_path(
+                root,
+                output_parent,
+                strict=True,
+            )
+            if resolved_parent != output_parent:
+                raise InvalidStorageKey("正式结果目录无效")
+
+            destination = output_parent / task_id_part
+            if destination.is_symlink():
+                existing_target = os.readlink(destination)
+                if Path(existing_target).is_absolute():
+                    raise InvalidStorageKey("正式结果目录无效")
+                resolved_target = self._contained_path(
+                    root,
+                    destination,
+                    strict=False,
+                )
+                if resolved_target == execution_dir:
+                    return True
+            elif destination.exists():
+                raise StorageConflict("正式结果目录已存在且不是受控链接")
+
+            relative_target = os.path.relpath(execution_dir, output_parent)
+            temporary_path = output_parent / f".{task_id_part}-{uuid4().hex}.tmp"
+            self._validate_component_lengths(root, (temporary_path.name,))
+            os.symlink(relative_target, temporary_path, target_is_directory=True)
+            temporary_created = True
+            os.replace(temporary_path, destination)
+            temporary_created = False
+            return True
+        except StorageError:
+            if temporary_created:
+                self._remove_partial_file(temporary_path)
+            raise
+        except (OSError, TypeError, ValueError) as error:
+            if temporary_created:
+                self._remove_partial_file(temporary_path)
+            raise StorageError("正式结果目录发布失败") from error
+        except BaseException:
+            if temporary_created:
+                self._remove_partial_file(temporary_path)
+            raise

@@ -293,6 +293,7 @@ def test_submit_dispatch_is_deferred_until_outer_database_commit(tmp_path):
                 user_id=user.pk,
                 channel="ios-cn",
                 logical_name="ppg",
+                source_filename="ppg.csv",
                 source=SimpleUploadedFile(
                     "ppg.csv",
                     b"timestampFrame,avgR\\n1,2\\n",

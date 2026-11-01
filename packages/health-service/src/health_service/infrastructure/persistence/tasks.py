@@ -19,6 +19,8 @@ from health_service.models import (
 from health_service.schemas.internal.execution import (
     ProjectedTaskMetricData,
     TaskExecutionContextData,
+    TaskInputUploadContextData,
+    TaskOutputPublicationData,
 )
 from health_service.schemas.internal.profiles import ProfileData
 from health_service.schemas.internal.tasks import (
@@ -106,12 +108,19 @@ def create_task_draft(*, user_id: int, channel_label: str, model_id: int) -> Tas
 
 def lock_draft_task_for_input_upload(
     *, task_id: int, user_id: int, channel_label: str
-) -> str | None:
-    """锁定本人当前渠道草稿并返回其固定算法标识。"""
+) -> TaskInputUploadContextData | None:
+    """锁定本人当前渠道草稿并返回固定算法及路径归属上下文。"""
     task = (
         Task.objects.select_for_update(of=("self",))
-        .select_related("model_version")
-        .only("id", "status", "model_version__algorithm_key")
+        .select_related("model_version", "channel")
+        .only(
+            "id",
+            "status",
+            "created_at",
+            "user_id",
+            "channel__label",
+            "model_version__algorithm_key",
+        )
         .filter(
             pk=task_id,
             user_id=user_id,
@@ -123,7 +132,13 @@ def lock_draft_task_for_input_upload(
         return None
     if task.status != Task.StatusChoices.DRAFT:
         raise TaskRecordConflictError
-    return task.model_version.algorithm_key
+    return TaskInputUploadContextData(
+        task_id=task.pk,
+        user_id=task.user_id,
+        channel_label=task.channel.label,
+        algorithm_key=task.model_version.algorithm_key,
+        created_at=task.created_at,
+    )
 
 
 def register_selected_task_input(
@@ -471,6 +486,34 @@ def save_task_execution_success(
             ]
         )
         return True
+
+
+def lock_successful_task_output_publication(*, task_id: int) -> TaskOutputPublicationData | None:
+    """在调用方事务中锁定成功任务并重读权威结果文件键。"""
+    task = (
+        Task.objects.select_for_update(of=("self",))
+        .select_related("channel")
+        .only("id", "created_at", "result_payload", "channel__label")
+        .filter(pk=task_id, status=Task.StatusChoices.SUCCEEDED)
+        .first()
+    )
+    if task is None or not isinstance(task.result_payload, dict):
+        return None
+    output_storage_keys = task.result_payload.get("output_files", {})
+    if not isinstance(output_storage_keys, dict) or any(
+        not isinstance(logical_name, str)
+        or not logical_name
+        or not isinstance(storage_key, str)
+        or not storage_key
+        for logical_name, storage_key in output_storage_keys.items()
+    ):
+        return None
+    return TaskOutputPublicationData(
+        task_id=task.pk,
+        channel_label=task.channel.label,
+        created_at=task.created_at,
+        output_storage_keys=dict(output_storage_keys),
+    )
 
 
 def record_task_execution_failure(
