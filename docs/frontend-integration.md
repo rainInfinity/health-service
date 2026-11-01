@@ -53,7 +53,7 @@ JSON 请求使用 `Content-Type: application/json`。受保护接口携带：
 Authorization: Bearer ACCESS_TOKEN
 ```
 
-文件上传使用 `multipart/form-data`，字段是 `logicalName` 和 `file`。浏览器发送 `FormData` 时不要手写 `Content-Type`，由浏览器生成带 boundary 的请求头。
+文件上传使用 `multipart/form-data`，字段是 `logicalName` 和 `file`。`logicalName` 必须是当前算法声明的逻辑名；服务端只从 `file` 的文件名提取最后一个后缀，大小写不敏感地校验算法白名单。当前 PPG 输入要求 `.csv`，不支持或缺失后缀返回 `422 INVALID_INPUT`。文件名、路径和 MIME 不代替算法内容校验。浏览器发送 `FormData` 时不要手写 `Content-Type`，由浏览器生成带 boundary 的请求头。
 
 注册、登录、刷新和登出不要求 Access Token；刷新和登出在 JSON 请求体中携带 Refresh Token。最终提交任务、发布版本不需要请求体。
 
@@ -290,7 +290,7 @@ PATCH 请求示例：
 
 #### 6.1.2 输入文件
 
-上传字段为 `logicalName=ppg`，文件必须是 UTF-8 CSV，可带 BOM。时间戳列 `timestampFrame` 必须为有限、严格递增的毫秒数值；通道列只能提供以下两组中的一组，且该组列必须齐全：
+上传字段为 `logicalName=ppg`，客户端文件名必须带 `.csv` 后缀（大小写不敏感）；此逻辑名和后缀是两个独立契约。文件内容必须是 UTF-8 CSV，可带 BOM。时间戳列 `timestampFrame` 必须为有限、严格递增的毫秒数值；通道列只能提供以下两组中的一组，且该组列必须齐全：
 
 | 格式 | 必需列 |
 |---|---|
@@ -321,6 +321,66 @@ PATCH 请求示例：
 | `RESULT.INVALID_OUTPUT` | 结果不符合契约，展示安全失败信息并联系后端；不要当作输入错误或质量拒绝。 |
 
 错误详情只使用公开的 `failureMessage` 和经校验的 `qualityFailure`；不要求或展示内部诊断、原始异常或健康数据。通用任务失败处理见第 7.6 节。
+
+### 6.2 PPG 主动离线血氧 v1（`ppg.active.offline.spo2.v1`）
+
+以下为正式血氧 v1 的前端接入契约。完整算法标识固定为 `ppg.active.offline.spo2.v1`；模型 ID、模型编码、名称和发布版本必须从目标普通渠道的模型目录读取，不能在客户端拼接。
+
+#### 6.2.1 模型信息与调用入口
+
+| 项目 | 当前契约 |
+|---|---|
+| 算法标识 | `ppg.active.offline.spo2.v1` |
+| 模型名称与发布版本 | 以目标渠道目录响应为准，不假定初始模型已配置 |
+| 输入逻辑名 | `ppg` |
+| 固定参数 | `null`，不接受非空参数 |
+| 模型制品 | 服务端版本必须绑定 `spo2`、`feature_names`、`stable_features`；普通用户端不上传制品 |
+| 健康资料 | 不需要 |
+| `isExample` | `false` |
+| 投影指标 | `spo2`：`percent` |
+
+通过 `GET /api/v1/{channel}/models` 读取当前已发布模型，再用返回的 `modelId` 创建任务。成功任务摘要的 `isExample=false` 来自代码注册的算法身份，不需要在 `result` 中重复传递。
+
+模型运行细节、JSON 特征清单格式和数值限制见[血氧 v1 算法开发说明](development/algorithms/ppg-active-offline-spo2-v1.md)。
+
+#### 6.2.2 输入文件
+
+上传 `logicalName=ppg`，文件格式和共享 PPG CSV 规则见第 6.1.2 节：时间戳列为有限、严格递增的毫秒 `timestampFrame`，且只能提供完整 RGB 或 YUV 通道组。血氧额外要求至少 450 帧、采样率大于 `8 Hz`；若提供 `blockIndex`，每行必须是整数 `0`。不支持多块输入或通过插值、补帧满足窗口要求。
+
+#### 6.2.3 成功结果与处理文件
+
+成功任务详情的 `data.result` 示例：
+
+```json
+{
+  "spo2": 100.0,
+  "quality": {"score": 88.5, "threshold": 70},
+  "window_predictions": [85.0, 103.0],
+  "window_starts": [0, 75],
+  "output_files": {"processed_ppg": "<opaque file reference>"}
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `spo2` | 取窗口预测最大值后限幅到 `[90,100]` 的百分数；对应指标值完全相同，单位 `percent` |
+| `quality.score`、`quality.threshold` | 本次实际质量评分和固定门槛；客户端展示服务端返回值，不重算 |
+| `window_predictions` | 每个窗口的原始有限模型预测，尚未限幅 |
+| `window_starts` | 与预测逐项对应的输入样本起点索引 |
+| `output_files.processed_ppg` | 本次处理后 PPG 的不透明下载引用，不是 URL 或服务器路径 |
+
+`processed_ppg` 下载内容为 `timestampFrame,ppg` CSV。低于 70 的质量评分会在特征计算和模型调用前拒绝；一个窗口的归一化输入为零、最大值聚合和 `[90,100]` 限幅是固定模型行为，不表示医学准确性或诊断结论。
+
+#### 6.2.4 算法失败处理
+
+| `failureCode` | 前端处理 |
+|---|---|
+| `INFERENCE.INVALID_INPUT` | 展示安全的 `failureMessage`；修正通道、时间轴、块布局、样本长度或采样率后创建新任务 |
+| `INFERENCE.QUALITY_REJECTED` | 按 `qualityFailure.reason` 处理；`LOW_SCORE` 使用服务端给出的实际 `score` 和 `threshold`，提示重新采集并创建新任务 |
+| `INFERENCE.INVALID_ARTIFACT`、`INFERENCE.INVALID_PARAMETERS` | 模型制品或固定参数配置错误，联系模型维护方 |
+| `RESULT.INVALID_OUTPUT` | 模型预测或结果不符合契约；展示安全失败信息，不显示血氧值，也不伪装成输入错误或质量拒绝 |
+
+质量拒绝和其他失败均为终态；不要重试原任务，也不要把异常、非法评分或无效预测解释成质量通过或医学结论。
 
 ## 7. 用户端推理任务与文件
 
@@ -508,9 +568,9 @@ file=选中的文件二进制
 | `RESULT.INVALID_OUTPUT` | 算法输出不符合结果契约；联系后端 |
 | `TASK.EXECUTION_ERROR`、`INFERENCE.EXECUTION_ERROR` | 安全的通用执行失败；保留任务 ID，联系后端 |
 
-输入错误只通过 `failureCode=INFERENCE.INVALID_INPUT` 和固定 `failureMessage` 表达，不新增原因字段，也不返回内部 `failureDetail`；正式 PPG v1 的文件要求和具体提示见第 6.1.2、6.1.4 节。
+输入错误只通过 `failureCode=INFERENCE.INVALID_INPUT` 和固定 `failureMessage` 表达，不新增原因字段，也不返回内部 `failureDetail`；各正式 PPG 算法的文件要求和具体提示见第 6.1.2、6.1.4 节及第 6.2.2、6.2.4 节。
 
-质量拒绝使用 `INFERENCE.QUALITY_REJECTED`，详情只在白名单校验通过时提供 `qualityFailure`。结果契约错误使用 `RESULT.INVALID_OUTPUT` 和固定文案“推理结果格式无效”，不作为输入问题或质量拒绝呈现。以上失败任务均为 `data.status=FAILED` 且 `result=null`；只有质量拒绝可以有 `qualityFailure`。优先展示安全 `failureMessage`，未知失败码使用通用提示；算法专属处理见第 6.1.4 节。
+质量拒绝使用 `INFERENCE.QUALITY_REJECTED`，详情只在白名单校验通过时提供 `qualityFailure`。结果契约错误使用 `RESULT.INVALID_OUTPUT` 和固定文案“推理结果格式无效”，不作为输入问题或质量拒绝呈现。以上失败任务均为 `data.status=FAILED` 且 `result=null`；只有质量拒绝可以有 `qualityFailure`。优先展示安全 `failureMessage`，未知失败码使用通用提示；算法专属处理见第 6 节对应算法小节。
 
 不要要求服务端返回堆栈或原始健康数据帮助定位。
 
@@ -518,7 +578,7 @@ file=选中的文件二进制
 
 输入下载使用上传返回的 `fileId`，可下载当前或历史输入。输出下载仅适用于 `SUCCEEDED`，从 `result.output_files` 取得逻辑名作为路径参数；该对象可能缺席。
 
-`output_files` 的值是服务端保存的不透明文件标识，不是公开 URL；不要展示、解析、拼接服务器路径或作为请求参数。前端只使用键构造输出下载接口，并对逻辑名做 URL 路径编码。正式 PPG v1 的输出逻辑名见第 6.1.3 节；其他算法按各自版本契约处理。
+`output_files` 的值是服务端保存的不透明文件标识，不是公开 URL；不要展示、解析、拼接服务器路径或作为请求参数。前端只使用键构造输出下载接口，并对逻辑名做 URL 路径编码。HR/BR v1 和 SPO2 v1 的输出逻辑名分别见第 6.1.3、6.2.3 节；其他算法按各自版本契约处理。
 
 下载仍需 `Authorization`，普通 `<a href>` 无法自行添加该请求头。浏览器建议使用带鉴权的 fetch 或 HTTP 客户端请求：先检查 HTTP 状态，失败时尝试读取 JSON 错误，成功后再转 Blob 并触发保存，使用后释放 Object URL。不要将令牌加进下载 URL。
 
@@ -550,7 +610,7 @@ file=选中的文件二进制
 
 ### 8.2 算法、参数和制品
 
-`algorithmKey` 指向后端代码显式注册的执行器，不能用任意字符串上传算法代码。当前正式心率／呼吸率算法为 `ppg.active.offline.hr_br.v1`；它要求单块 `ppg` 输入，固定参数为空，不需要模型制品或健康资料，并声明 `hr`、`br` 两个指标。计算结果不代表医学准确性认证。未注册或已移除的标识不能创建、发布或执行；不提供无修订号别名。
+`algorithmKey` 指向后端代码显式注册的执行器，不能用任意字符串上传算法代码。正式 `ppg.active.offline.hr_br.v1` 要求单块 `ppg`、空参数、无制品和无健康资料，并声明 `hr`、`br` 指标；正式 `ppg.active.offline.spo2.v1` 要求单块 `ppg`、空参数、三个模型制品、无健康资料，并声明 `spo2` 指标。两者都由代码定义 `isExample=false`，计算结果均不构成医学准确性认证。未注册或已移除的标识不能创建、发布或执行；不提供无修订号别名。
 
 创建版本请求：
 
@@ -568,20 +628,26 @@ PATCH 仅可修改未发布版本的算法标识和参数，不用于修改版�
 
 制品按算法要求的逻辑名上传，非空且受部署上传上限约束。同版本同逻辑名重复登记返回冲突，不能将任务输入的「同名重传自动选择」规则套用到模型制品。发布时制品逻辑名集合必须与算法声明完全一致，不能随意增加附件。
 
-正式 PPG v1 不接受非空参数，也不要求模型制品；发布时保持 `params=null` 或空对象并跳过制品上传。其他算法的参数和制品要求以其注册契约为准。当前没有算法注册表查询接口供前端动态生成管理表单。
+正式 HR/BR v1 与 SPO2 v1 均不接受非空参数，也不要求健康资料；HR/BR v1 不需要制品，SPO2 v1 必须绑定 `spo2`、`feature_names`、`stable_features` 三个制品。发布时按算法契约设置完整制品集合；其他算法的参数和制品要求以其注册契约为准。当前没有算法注册表查询接口供前端动态生成管理表单。
 
 ### 8.3 指标配置
 
 `valueType` 只允许 `number`、`boolean`，布尔指标不能设置非空 `unit`。数值指标的代码、类型和单位必须与算法声明一致，单位不能自行翻译成展示文案后再提交。
 
-正式 PPG v1 声明两个指标：
+HR/BR v1 声明两个指标：
 
 | `code` | `valueType` | `unit` | 含义 |
 |---|---|---|---|
 | `hr` | `number` | `beats_per_minute` | 心率 |
 | `br` | `number` | `breaths_per_minute` | 呼吸率 |
 
-创建全局指标时，对 `hr` 和 `br` 分别调用 `POST /api/v1/manager/metrics`；若代码已存在，先确认其类型和单位一致，不要把冲突响应当作创建成功。
+SPO2 v1 声明一个指标：
+
+| `code` | `valueType` | `unit` | 含义 |
+|---|---|---|---|
+| `spo2` | `number` | `percent` | 血氧百分数 |
+
+创建全局指标时，分别为目标算法创建所需指标；若指标代码已存在，先确认其类型和单位一致，不要把冲突响应当作创建成功。
 
 版本指标配置请求：
 
@@ -590,6 +656,8 @@ PATCH 仅可修改未发布版本的算法标识和参数，不用于修改版�
   "metricCodes": ["hr", "br"]
 }
 ```
+
+以上 `metricCodes` 示例对应 HR/BR；SPO2 v1 应配置完整集合 `{"metricCodes":["spo2"]}`，不能把不同算法的指标混合到同一版本。
 
 PUT 是替换完整投影集合，不是追加；空数组表示清空，重复代码、未知代码或不匹配的算法语义返回 422。并非必须选择算法的全部指标，投影集合也不决定详情 `result` 的完整内容。
 
@@ -674,7 +742,7 @@ curl --include --request POST "$BASE_URL/api/v1/$CHANNEL/tasks/$TASK_ID/files" \
 - [ ] 身高、体重按字符串响应处理；时间不因浏览器或宿主机时区被错误转换。
 - [ ] 用户目录只展示本渠道可用版本，并按通用 `isExample` 字段标注用途；空目录不回退到其他渠道。
 - [ ] 草稿能上传和同名重传，保存不同 `fileId`；旧输入仍可下载。
-- [ ] 缺少必需输入时提交失败；符合第 6.1.2 节正式 PPG v1 条件的 CSV 能走到成功，并返回第 6.1.3 节结果。
+- [ ] 缺少算法必需输入时提交失败；符合所选算法对应章节（HR/BR 为 6.1.2，SPO2 为 6.2.2）条件的 CSV 能执行成功并返回对应结果字段。
 - [ ] 非法 CSV 可上传和提交，但执行后失败；界面区分 API 成功与任务失败。
 - [ ] 重复提交及提交后上传被拒绝；超时不盲目创建或提交重复任务。
 - [ ] 修改实时资料不会改变已提交任务；补全资料后通过新任务重新提交。
@@ -695,7 +763,7 @@ curl --include --request POST "$BASE_URL/api/v1/$CHANNEL/tasks/$TASK_ID/files" \
 | HTTP 200 但任务失败 | 查看 `data.status`、`failureCode`、`failureMessage`，外层 `code` 仅表示查询成功 |
 | 刷新页面后上传列表消失 | 当前没有服务端输入列表接口，详情也没有输入集合；不要伪造服务端恢复结果 |
 | 模型已发布但用户看不到 | 检查目标普通渠道是否选择了该版本，并使用目标渠道令牌查询 |
-| 成功任务没有输出下载入口 | 检查是否存在 `result.output_files`；正式 PPG v1 的输出逻辑名见第 6.1.3 节，其他算法遵循自身契约 |
+| 成功任务没有输出下载入口 | 检查是否存在 `result.output_files`；输出逻辑名分别见第 6.1.3、6.2.3 节，其他算法遵循自身契约 |
 | 时间显示偏移八小时 | 检查是否把无后缀北京时间当成 UTC，或使用浏览器隐式解析 |
 | 422 没有具体字段错误 | 当前只返回统一安全错误；前端本地校验并结合当前操作提示，附 `requestId` 联调 |
 

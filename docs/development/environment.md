@@ -103,7 +103,38 @@ Django 从项目根目录读取可选的 `.env`，不受启动时工作目录影
 
 所有时长和数量配置必须为正整数；无效值、空队列名称或不可读写的存储目录会使 Django 启动失败。
 
-`TASK_DATA_ROOT` 包含原始健康输入和推理输出，不能配置为公开静态目录；`MODEL_ARTIFACT_ROOT` 保存模型制品。运行 Web 与消费者的操作系统账号都必须对相同目录具备搜索、读取和写入权限。上传写盘与数据库登记不是原子操作；中断或登记回滚可能留下孤儿文件，本地存储不会自动清理旧输入、输出或孤儿文件。只有通过任务记录或成功结果登记的相对键才可由业务读取；输入和输出下载仍须检查账号、来源渠道及成功结果授权。
+`TASK_DATA_ROOT` 包含原始健康输入和推理输出，不能配置为公开静态目录；`MODEL_ARTIFACT_ROOT` 保存模型制品。Web 与消费者必须配置为访问同一物理卷上的目录。上传写盘与数据库登记不是原子操作，失败可能留下孤儿文件。成功推理先提交数据库结果与指标，再发布正式目录链接；数据库和文件系统不构成原子事务，链接发布可能短暂滞后。发布失败不回滚成功状态，也不重跑算法；后续成功终态消息或授权输出下载会幂等恢复链接。下载始终打开数据库登记的不可变实际 `storage_key`，不通过正式链接解析结果；链接恢复失败但实际文件存在时仍可下载，实际文件缺失返回安全 404。存储不会自动清理旧输入、输出、孤儿文件或执行目录；路径本身不授予读取权限。
+
+#### 新文件目录与命名
+
+新上传的输入、模型制品和推理输出分别使用以下相对路径；根目录配置仍由 `TASK_DATA_ROOT` 与 `MODEL_ARTIFACT_ROOT` 控制：
+
+```text
+var/
+├── tasks/
+│   ├── <渠道代码>/
+│   │   └── <YYYYMMDD>/
+│   │       ├── <YYYYMMDD_HHmmss>-<task_id>-<user_id>-<algorithm_key>-<logical_name>-<UUID>.<ext>
+│   │       └── outputs/
+│   │           └── <task_id>/                 # 指向成功执行目录的受控相对目录链接
+│   └── .executions/
+│       └── <task_id>/<execution_token>/
+│           └── <算法原结果文件名>
+└── model-artifacts/
+    └── <model_code>/<version>/
+        ├── <logical_name>-<UUID>.<ext>
+        └── ...
+```
+
+任务输入的渠道目录使用固定渠道代码，不在文件名中重复渠道。`<YYYYMMDD>` 与文件名前缀 `<YYYYMMDD_HHmmss>` 均从任务创建时间转换到 `Asia/Shanghai` 后生成，格式分别为 `yyyyMMdd` 与 `yyyyMMdd_HHmmss`；上传跨日时仍使用任务创建日期。输入文件名依次携带任务 ID、用户 ID、算法 key、逻辑名和 32 位小写十六进制 UUID，客户端原始文件名不进入存储路径。示例：`ios-cn/20261101/20261101_003045-42-7-ppg.active.offline.hr_br.v1-ppg-<UUID>.csv`。
+
+模型制品路径按稳定 `model_code`、版本号和逻辑名分层；例如 `spo2` ONNX 制品使用 `<model_code>/<version>/spo2-<UUID>.onnx`，`feature_names` 与 `stable_features` 清单使用 `.json`，UUID 同样为 32 位小写十六进制。输入和制品的扩展名从上传文件名提取、转为小写并按算法契约校验；逻辑名与扩展名是独立字段，扩展名不代替内容校验。
+
+算法 key、逻辑名、模型编码和版本号等业务路径段按 UTF-8 字节进行可逆百分号编码：字母、数字、点和下划线保留，其余字节（包括连字符）编码为大写 `%HH`；固定渠道代码保留原值。整段 `.`、`..` 必须编码或拒绝。保存前按文件系统字节上限检查目录段和完整文件名，超限时安全拒绝，不截断、不替换字符。
+
+正式结果入口是 `<渠道代码>/<任务创建日期>/outputs/<task_id>/`，由服务端管理的相对目录符号链接指向同一任务根目录内已成功执行的 `.executions/<task_id>/<execution_token>/`。目录整组切换，保留算法原文件名，例如 `ppg-processed.csv`；算法只写本次 `output_dir`，不得写入或推导正式目录。执行临时文件不进入正式结果目录。
+
+新路径只用于新写入。数据库已登记的旧 `storage_key` 继续按根目录边界读取，包括旧输入和制品的 `uploads/<UUID>.bin`、旧结果的 `outputs/<task_id>/<execution_token>/<文件名>`；不解析旧名来授权，不搬迁或重命名存量文件。文件系统与数据库登记失败可能留下孤儿文件，本地存储不扫描或自动清理旧文件、孤儿文件及执行目录。
 
 派发扫描不新增环境变量：每轮最多查询 100 个任务，按主键稳定排序，处理未发布或超过 `INFERENCE_DISPATCH_INTERVAL_SECONDS` 的 `SUBMITTED`，也会重新派发数据库时间判定已过期的 `RUNNING`。Redis 发布失败不更新 `last_dispatched_at`，不消耗执行次数；消息成功但数据库补记失败时允许安全重复派发。
 
@@ -141,6 +172,42 @@ uv run --locked --all-packages pytest --reuse-db --create-db
 
 日常运行不要省略 `--reuse-db`，否则 pytest-django 会按默认行为重新创建并清理测试库。
 
+### 文件路径与结果发布验收记录
+
+该命令使用 `--reuse-db` 保留 pytest 测试库；存储集成场景使用临时目录，消费者测试使用独立命名的 Redis Stream：
+
+```sh
+uv run --locked --all-packages pytest --reuse-db \
+  tests/unit/test_inference_algorithms.py \
+  tests/unit/test_local_storage.py \
+  tests/unit/test_inference_logging.py \
+  tests/integration/api/test_task_inputs.py \
+  tests/integration/api/test_catalog.py \
+  tests/integration/api/test_task_file_downloads.py \
+  tests/integration/catalog/test_publication.py \
+  tests/integration/workflows/test_inference_adapter.py \
+  tests/integration/workflows/test_task_results.py \
+  tests/integration/workflows/test_inference_consumer.py \
+  tests/integration/workflows/test_spo2_inference_consumer.py \
+  -q
+```
+
+最近一次结果为 115 passed、95 warnings，耗时 55.21 秒。警告来自 SciPy/NeuroKit 与 pyPPG/NumPy 的弃用和数值运行时提示。
+
+HR/BR 工作流将任务创建时间设为执行日前一日，经普通 `ios-cn` 账号的 HTTP 路由上传两份 PPG、提交并运行 Redis Stream 消费者；输入和结果路径仍按任务创建日生成。历史输入仍可下载，正式目录链接到数据库登记的 `.executions` 执行目录，两个波形下载字节与实际结果文件相同。越权账号和跨渠道下载均被拒绝。
+
+SpO2 自动化工作流回归使用测试生成的 ONNX；另以本机旧制品完成真实上传验收：通过 Django HTTP 客户端调用 Manager API，在 `health_service` 新建 `ppg.active.offline.spo2` 的 DRAFT 版本 `1.0.0`。三次制品上传均返回 HTTP 201；版本未发布、未切换渠道，既有 HR/BR 版本未改动。
+
+本次从 `var/old-assets/` 上传真实 `spo2-latest-spo2.onnx`；363 项 `feature_names.npy` 使用 `allow_pickle=False` 读取并转换为 JSON。22 项 `stable_features.pkl` 仅用 opcode 白名单解析为字符串列表后转换为 JSON，未执行 pickle。资源工厂通过数据库登记的存储键成功创建 ONNX Runtime 会话；22 个稳定特征都存在于完整清单，且匹配 ONNX 输入宽度。
+
+制品保存于 `var/model-artifacts/`，相对键符合以下结构：
+
+```text
+ppg.active.offline.spo2/1.0.0/spo2-<UUID>.onnx
+ppg.active.offline.spo2/1.0.0/feature_names-<UUID>.json
+ppg.active.offline.spo2/1.0.0/stable_features-<UUID>.json
+```
+
 ## 安装、迁移与启动
 
 升级既有数据库前，应先停止旧推理消费者，并只读检查是否存在旧 `RUNNING` 任务；在维护窗口运行迁移。迁移会为这些任务生成执行令牌并设置已过期租约，保留 `started_at`、输入快照及历史结果，随后由新消费者恢复。不要让新旧消费者在迁移期间并行运行。
@@ -157,7 +224,7 @@ LOG_DIR=logs/web uv run --locked --package health-service uvicorn config.asgi:ap
 
 ## 独立推理消费者运行与部署
 
-Web 与消费者必须使用同一版本代码、数据库、Redis 配置及共享可达的 `TASK_DATA_ROOT`、`MODEL_ARTIFACT_ROOT`，但使用各自独立的 `LOG_DIR`，避免多个进程写入同一轮转文件。在项目根目录另开进程运行常驻消费者；每个消费者实例使用不同名称，省略 `--consumer` 时命令会生成主机名、进程号和随机后缀：
+Web 与消费者必须使用同一版本代码、数据库、Redis 配置及同一物理卷上的 `TASK_DATA_ROOT`、`MODEL_ARTIFACT_ROOT`，但使用各自独立的 `LOG_DIR`，避免多个进程写入同一轮转文件。当前正式目录发布依赖 POSIX 相对目录符号链接及同一父目录内 `os.replace` 的原子替换；部署前必须在实际卷验证两项能力，不支持时停止部署，不退化为逐文件复制。各进程使用的操作系统账号都须有相应目录权限。在项目根目录另开进程运行常驻消费者；每个消费者实例使用不同名称，省略 `--consumer` 时命令会生成主机名、进程号和随机后缀：
 
 ```sh
 LOG_DIR=logs/inference uv run --locked --package health-service python manage.py run_inference --consumer local-inference-01
@@ -169,13 +236,13 @@ LOG_DIR=logs/inference uv run --locked --package health-service python manage.py
 LOG_DIR=logs/inference uv run --locked --package health-service python manage.py run_inference --consumer manual-recovery --once
 ```
 
-每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
+每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；成功任务的终态消息在确认前会尝试恢复正式结果链接，失败终态不发布输出。畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
 
 算法只在明确质量拒绝时以 `INFERENCE.QUALITY_REJECTED` 进入 `FAILED` 终态；消费者在失败信息提交后才确认消息。`LOW_SCORE` 私有明细保存本次实际分数和阈值，`NO_VALID_SIGNAL` 不保存评分。已拒绝任务不会由补发扫描或消息重放重新执行；重新采集应创建携带新输入的新任务。既有恢复仍仅覆盖可派发的 `SUBMITTED` 和租约已过期的 `RUNNING`，不改变失败终态。事件日志只记录实际错误码，不记录质量原因、评分、阈值或异常正文。这条反馈通道不代表已新增质检规则，也不验证医学准确性。
 
 消费者遇到数据库或 Redis 故障会停止并报告固定错误，不把基础设施故障记成算法失败。修复依赖后可重新启动；数据库补发扫描会再次驱动仍可执行任务。Redis Stream 不会自动裁剪，可能持续增长；不要手工清空或裁剪仍有待恢复消息的 Stream，部署时应监控 Redis 容量并制定与消息恢复语义兼容的保留策略。
 
-**升级顺序：**先暂停新任务提交并备份数据库及两个文件根目录；停止旧消费者，检查遗留 `RUNNING` 任务；在维护窗口运行迁移；以共享配置启动新 Web 与消费者并确认可用后再开放提交。新旧消费者不得并行运行。**回滚顺序：**先暂停新提交，向消费者发送 SIGTERM 并等待当前安全执行结束，再停止 Web；保留数据库迁移字段、Redis Stream 和文件，不执行破坏性反向迁移或清理。旧版本不具备租约及 Stream 协议时不要启动旧消费者；未完成任务应留待兼容版本恢复。
+**升级顺序：**先暂停新任务提交并备份数据库及两个文件根目录；停止旧消费者，检查遗留 `RUNNING` 任务；在维护窗口运行迁移；确认共享卷支持相对目录链接和同父目录原子替换；以共享配置启动新 Web 与消费者并确认可用后再开放提交。新旧消费者不得并行运行。**回滚顺序：**先暂停新提交，向消费者发送 SIGTERM 并等待当前安全执行结束，再停止 Web；保留数据库迁移字段、Redis Stream、`.executions`、正式目录链接及所有被数据库键引用的文件，不执行破坏性反向迁移或清理。回退版本必须先验证其通用存储键读取器可读新路径；不能假定旧版执行目录校验理解 `.executions`。若无法证明兼容，保留当前版本并前滚修复，不移动或删除存量文件。
 
 日志不得包含原始输入、输出内容、完整结果、健康资料快照、文件路径、执行令牌、Access／Refresh Token 或含凭证的 Redis URL。消费者故障定位使用固定错误摘要；不要为排查故障而放宽日志白名单。
 
@@ -189,7 +256,8 @@ LOG_DIR=logs/inference uv run --locked --package health-service python manage.py
 | `inference.task.failed` | 失败终态已提交，包含实际安全 `errorCode`。 |
 | `inference.task.lease_lost` | 续约失权、维护异常或终态写入被拒绝；不报告当前执行成功。 |
 | `inference.dispatch.failed` | 发布或派发时间补记失败，仍保留既有恢复资格。 |
+| `inference.output.publish_failed` | 成功结果保持不变，但正式目录链接发布失败；实际文件仍可按数据库键下载，后续请求可恢复链接。 |
 | `inference.worker.error` | 数据库或 Redis 基础设施故障，不等同于算法失败。 |
 
-任务事件可用 `consumer`、`taskId`、`messageId` 关联，`durationMs` 为单调时钟耗时，不因时间展示到秒而丢失毫秒精度。重复终态消息或有效租约占用不会制造新的开始事件。确认失败发生在成功事件之后时，以数据库成功状态为准，后续重放只需确认；不能把基础设施错误当作业务失败。受限字段不含原始异常正文、堆栈、SQL、输入输出或执行令牌。
+任务事件可用 `consumer`、`taskId`、`messageId` 关联，`durationMs` 为单调时钟耗时，不因时间展示到秒而丢失毫秒精度。重复终态消息或有效租约占用不会制造新的开始事件；成功终态重放会基于数据库权威结果幂等恢复正式链接后确认，不重新计算。确认失败发生在成功事件之后时，以数据库成功状态为准；不能把基础设施错误当作业务失败。受限字段不含原始异常正文、堆栈、SQL、输入输出或执行令牌。
 

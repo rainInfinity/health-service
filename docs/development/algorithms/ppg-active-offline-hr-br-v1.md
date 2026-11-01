@@ -1,6 +1,6 @@
 # PPG 主动离线 HR/BR v1
 
-算法标识：`ppg.active.offline.hr_br.v1`。实现目录：`packages/health-inference/src/health_inference/algorithms/ppg_active_offline_hr_br_v1/`。输入由 `load_input.py` 读取，输出构建和 `valid_output` 校验位于 `build_output.py`；类型名中的 PPG 缩写统一大写。
+算法标识：`ppg.active.offline.hr_br.v1`。实现目录：`packages/health-inference/src/health_inference/algorithms/ppg_active_offline_hr_br_v1/`。共享输入解析位于 `health_inference/utils/ppg_input.py`，预处理和输出构建分别位于 `preprocessing.py`、`build_output.py`；类型名中的 PPG 缩写统一大写。
 
 ## 输入格式
 

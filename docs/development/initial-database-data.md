@@ -4,7 +4,7 @@
 
 ## 算法注册与数据库目录
 
-算法执行器由 `health-inference` 代码显式注册，不存在独立的算法数据库表。当前正式实现的算法标识为 `ppg.active.offline.hr_br.v1`；数据库中的 `ModelVersion.algorithm_key` 引用这个代码标识。未在当前代码注册的规划中算法，不应提前写入模型目录或发布。
+算法执行器由 `health-inference` 代码显式注册，不存在独立的算法数据库表。当前正式算法包括 `ppg.active.offline.hr_br.v1` 和 `ppg.active.offline.spo2.v1`；本文的初始数据库目录仍只配置 HR/BR 模型，血氧测试制品不会自动进入初始数据或生产配置。数据库中的 `ModelVersion.algorithm_key` 引用完整算法标识；未在当前代码注册的规划中算法不能提前写入模型目录或发布。
 
 渠道、模型、模型版本、指标定义、版本指标关系及渠道选择分别保存在 `health_channel`、`health_model`、`health_model_version`、`health_metric_definition`、`health_model_version_metric` 和 `health_channel_model_selection`。
 
@@ -56,7 +56,7 @@
 ## 维护流程
 
 1. 先按[环境配置与服务运行](environment.md)完成数据库迁移；迁移只建立表结构，不会自动创建上述业务目录数据。
-2. 确认当前部署的 `health-inference` 已注册 `ppg.active.offline.hr_br.v1`，且算法声明与本清单中的输入、制品、资料和指标契约一致。
+2. 确认当前部署的 `health-inference` 已注册本清单所需的 `ppg.active.offline.hr_br.v1`，且算法声明与初始模型的输入、制品、资料和指标契约一致；其他算法版本按各自注册契约核对。
 3. 使用受保护的管理端目录接口创建或核对模型、模型版本和指标；设置版本指标后再发布。
 4. 为每个普通渠道设置初始版本。`manager` 仅用于管理认证和管理接口，不配置普通模型选择。
 5. 首次配置后，按数据库中的现状维护渠道选择。已发布版本不可原地改写；若计算契约改变，应按算法与模型版本规则发布新配置，不要用重新初始化覆盖历史数据。

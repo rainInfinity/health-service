@@ -65,7 +65,7 @@ uv sync --locked --package health-inference --no-dev
 
 `health_inference` 通过代码显式注册的稳定 `algorithm_key` 提供可执行定义及参数、结果校验；数据库只保存算法标识和版本参数，不增加 `input_spec` 字段，也不允许从数据库动态导入类路径。`health_service.infrastructure.inference_adapter` 将固定版本、选中文件和提交快照转换为纯计算输入，不让算法访问 ORM、HTTP 或实时资料。
 
-正式算法 `ppg.active.offline.hr_br.v1` 接受单块 `ppg` 输入并返回 HR、BR 与实际质量分数；无必需制品或健康资料，固定参数必须为空，指标单位分别为 `beats_per_minute` 和 `breaths_per_minute`。通用 `isExample` 字段由算法定义决定，模型名称和客户端参数不能改变该身份；正式 PPG v1 返回 `false`。
+正式算法 `ppg.active.offline.hr_br.v1` 接受单块 `ppg` 输入并返回 HR、BR 与实际质量分数；无必需制品或健康资料，固定参数必须为空，指标单位分别为 `beats_per_minute` 和 `breaths_per_minute`。正式算法 `ppg.active.offline.spo2.v1` 同样接受单块 `ppg` 且无健康资料，固定参数为空，要求三个模型制品并投影 `spo2`／`percent`。通用 `isExample` 字段由算法定义决定，模型名称和客户端参数不能改变该身份；两项正式 PPG v1 均返回 `false`。
 
 ## 六大渠道与 API
 
@@ -73,7 +73,7 @@ uv sync --locked --package health-inference --no-dev
 
 新 API 建议采用 `/api/v1/<channel>/...`。路由指定预期渠道，认证得到的渠道必须与之匹配；同一行为复用 HTTP handler、Schema 和应用用例，确有差异时才增加渠道专用适配。`manager` 除渠道识别外，还必须校验登录人员的管理权限。渠道标识或移动端内置密钥不能代替用户身份认证与任务归属校验。
 
-API 版本决定 HTTP 请求和响应契约；移动 App 发布版本、模型版本和渠道 label 分别管理。模型目录在 `manager` 权限下创建模型和未发布版本；只有代码显式注册的算法可发布，发布事务在版本行锁内校验固定参数、与算法声明完全一致且物理文件存在的制品集合，以及代码、值类型和单位都匹配的投影指标。正式 `ppg.active.offline.hr_br.v1` 可在空制品、空参数及匹配 HR/BR 指标契约时发布。版本发布后执行配置不可原地修改，重复发布不改变首次发布时间。
+API 版本决定 HTTP 请求和响应契约；移动 App 发布版本、模型版本和渠道 label 分别管理。模型目录在 `manager` 权限下创建模型和未发布版本；只有代码显式注册的算法可发布，发布事务在版本行锁内校验固定参数、与算法声明完全一致且物理文件存在的制品集合，以及代码、值类型和单位都匹配的投影指标。正式 HR/BR v1 可在空制品、空参数及匹配 HR/BR 指标契约时发布；正式 SPO2 v1 需绑定 `spo2`、`feature_names`、`stable_features` 并匹配 `spo2`／`percent` 指标。版本发布后执行配置不可原地修改，重复发布不改变首次发布时间。
 
 每个已知渠道独立选择一个属于目标模型的已发布版本。选择事务依次锁渠道行、选择行和旧版本 `DRAFT` 任务行，并原子更新选择、终止旧草稿；同版本重选不改任务，已提交或运行中的任务继续使用固定版本，回退不会复活已失败草稿。普通渠道目录只返回自身当前发布版本、所需输入逻辑名和 `isExample`，不暴露参数或文件路径。
 

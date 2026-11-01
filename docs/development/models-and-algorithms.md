@@ -9,12 +9,13 @@
 | 传感器集合 | 算法使用的传感器或信号类型；多个类型按约定顺序连接。 | `ppg`、`rppg`、`ppg_acc` |
 | 采集模式 | 测量数据的采集方式。 | `active`、`passive` |
 | 处理模式 | 对数据执行推理的方式。 | `offline`、`realtime` |
-| 输出 | 算法输出的业务指标类别。 | `hr`、`hr_br`、`bp` |
+| 输出 | 算法输出的业务指标类别。 | `hr`、`hr_br`、`spo2`、`bp` |
 | 实现修订号 | 固定一份可执行实现及其规则，区别于模型发布版本号。 | `v1`、`v2` |
 
 示例：
 
 - `ppg.active.offline.hr_br.v1`：主动采集 PPG，离线输出心率和呼吸率的第一个实现修订。
+- `ppg.active.offline.spo2.v1`：主动采集 PPG，离线输出血氧的第一个实现修订。
 - `rppg.passive.offline.hr.v1`：被动采集 rPPG，离线输出心率的第一个实现修订。
 - `rppg.active.realtime.hr.v1`：主动采集 rPPG，实时输出心率的第一个实现修订。
 - `ppg_acc.active.offline.bp.v1`：主动采集 PPG 和加速度信号，离线输出血压相关结果的第一个实现修订。
@@ -27,11 +28,11 @@
 
 ## 正式离线算法开发规范
 
-统一离线流水线、策略接口和正式 HR/BR v1 执行器均已实现；`ppg.active.offline.hr_br.v1` 会根据单块 PPG 输入计算 HR/BR 并执行实际质量门禁，但计算结果不代表医学准确性认证。实时算法不强行套用离线流水线。
+统一离线流水线、策略接口及正式 HR/BR、SPO2 v1 执行器均已实现；两者分别按自己的 PPG、质量和结果契约执行，计算结果均不代表医学准确性认证。实时算法不强行套用离线流水线。
 
 ### 执行模板与策略
 
-保留 `AlgorithmDefinition.run()` 作为契约校验入口，负责必需文件、制品、资料、固定参数及输出契约校验。其内部由统一离线模板固定执行顺序：读取与校验输入、预处理、质量检测、原始推理、可选的固定版本结果后处理、组织结果与输出文件。具体算法实现阶段方法并装配策略，不自行重写执行顺序，也不引入可任意排列节点的工作流配置。
+算法定义通过 `create_runtime(VersionResources(...))` 将固定参数与已解析制品路径交给版本资源工厂，创建绑定单个发布版本的 `AlgorithmRuntime`。直接执行使用 `runtime.run(InferenceInput(...))`；入口逐任务校验必需输入、固定参数和制品路径、必需资料，以及完整输出与指标契约。运行时内部由统一离线模板固定执行顺序：读取与校验输入、预处理、质量检测、原始推理、可选的固定版本结果后处理、组织结果与输出文件。具体算法实现阶段方法并装配策略，不自行重写执行顺序，也不引入可任意排列节点的工作流配置。
 
 质量检测和独立结果后处理分别使用策略接口。质量策略只报告本算法实际执行的评价；拒绝后立即停止，不进入推理或成功输出。未执行质检必须与质检通过区分，不能返回默认满分。若范围或有效性规则与最终载荷、文件紧密耦合，可由 `build_output.py` 在构造指标和写文件前处理；无论采用哪种组织方式，完整结果和投影指标都必须使用同一份最终数值。共享模板不设置通用质量阈值、医学范围或补值规则。
 
@@ -44,18 +45,21 @@
 | 模块 | 职责 |
 |---|---|
 | `algorithm.py` | 声明算法契约、装配模板，并用短小方法衔接阶段；不堆放长篇输入解析、文件写入或结果校验。 |
-| `load_input.py` | 读取文件，校验字段、数值与时间轴，形成已校验输入。 |
+| `health_inference/utils/ppg_input.py` | 共享 RGB/YUV PPG CSV 解析、通道和时间轴校验。 |
+| `load_input.py` | 校验当前算法额外的输入边界，如固定窗口长度或采样率。 |
 | `preprocessing.py` | 通道转换、信号提取、滤波、标准化或特征准备。 |
 | `quality.py` | 实现该修订的质量评价策略与拒绝规则。 |
 | `inference.py` | 根据预处理数据执行模型推理或确定性数值估计，产生原始预测。 |
 | `build_output.py` | 构建最终载荷、指标和处理文件，并校验最终结果。 |
 | `postprocessing.py` | 仅在该修订需要独立后处理策略时采用；与输出构造紧密耦合的规则可在 `build_output.py` 中、写文件前处理。 |
 
-数据结构就近定义，使用明确类型传递阶段数据，不恢复不断写入通用字典的旧阶段容器。质量检测和推理复用同一份预处理结果；质量检测不原地修改后续推理使用的信号。PPG v1 使用 `load_input.py` 与 `build_output.py`，不创建算法专属 `postprocessing.py`；通用模板的可选策略接口仍保留。公共计算逻辑仅在存在真实复用时按职责提取，不预先搬入笼统的 `utils` 层。
+数据结构就近定义，使用明确类型传递阶段数据，不恢复不断写入通用字典的旧阶段容器。质量检测和推理复用同一份预处理结果；质量检测不原地修改后续推理使用的信号。PPG v1 将跨算法共用的 CSV 校验集中在 `health_inference/utils/ppg_input.py`；算法额外输入边界留在各自 `load_input.py`。只把真实共用职责放入按领域命名的工具模块，不为假想复用建立笼统工具层。共同计算逻辑仅在存在真实复用时按职责提取。
 
 ### 版本与任务状态隔离
 
-算法实例及策略只保存对应版本的固定配置和可复用资源，输入、波形、评分、预测和输出路径属于单次调用，不保存在共享实例上。不同模型发布版本不能相互覆盖策略配置；不同算法修订不能依赖会随新修订变化的默认实现。公共函数、模板或依赖升级不能无意改变旧修订的解释；需要严格数值复现时，还须保留对应依赖环境，目录名本身不构成复现保证。
+算法定义、策略和 `AlgorithmRuntime` 只保存对应版本的固定参数、已解析制品路径和可复用执行资源；输入、波形、评分、预测和输出路径属于单次调用，不保存在共享运行时上。不同模型发布版本不能相互覆盖策略配置；不同算法修订不能依赖会随新修订变化的默认实现。公共函数、模板或依赖升级不能无意改变旧修订的解释；需要严格数值复现时，还须保留对应依赖环境，目录名本身不构成复现保证。
+
+服务端适配器以固定模型版本主键缓存 `AlgorithmRuntime`，而非缓存任务输入。消费者停止并排空后调用 `clear_version_runtime_cache()` 释放运行时引用；该操作不删除登记的模型制品。新发布版本使用独立运行时，历史任务仍按其固定版本执行。
 
 ### 输入错误、质量拒绝与执行错误
 
@@ -65,7 +69,7 @@
 
 ### 依赖、输出与验证
 
-`health-inference` 基础依赖包含 pandas 与 NumPy，SciPy、NeuroKit2 等推理库由可选安装项声明并使用工作区单一锁文件。基础安装中的库仍须惰性导入：算法注册和 Web 启动不得加载 CSV 或计算路径专用库。算法不访问 ORM、HTTP 或实时健康资料，只使用执行输入提供的固定数据。处理后文件写入本次执行的 `output_dir`，通过逻辑引用返回，不依据上传路径替换规则推导输出位置。
+`health-inference` 基础依赖包含 pandas 与 NumPy，SciPy、NeuroKit2 等推理库由可选安装项声明并使用工作区单一锁文件。基础安装中的库仍须惰性导入：算法注册和 Web 启动不得加载 CSV 或计算路径专用库。算法不访问 ORM、HTTP 或实时健康资料，只使用执行输入提供的固定数据。算法只向本次唯一 `output_dir` 写文件，并以 `output_files` 的逻辑名到本地路径返回；服务端验证文件属于当前执行目录后，将不可变实际存储键写入成功结果。成功事务提交后，服务端才把 `<渠道代码>/<任务创建日期>/outputs/<task_id>/` 相对目录链接切换到该执行的完整输出集合。算法不得推导或写入该正式路径；用户下载始终按数据库实际键读取，终态消息或下载请求可幂等恢复链接而不重新运行算法。
 
 验证应覆盖真实计算行为、输入拒绝、质量门禁、后处理边界、结果与指标一致性，以及版本和任务隔离。单元测试放在 `tests/unit/`，跨模块任务流程放在 `tests/integration/workflows/`。新增实现应提供实际运行证据；合成样本和旧版数值对照不能替代医学准确性验证。具体算法的后处理范围、补值行为和多块输入策略必须单独确定，不能由通用开发规范代选。
 
@@ -75,7 +79,9 @@
 
 管理目录路由为：`POST /manager/models`；`GET`／`POST /manager/models/{model_id}/versions`；`PATCH /manager/model-versions/{version_id}`；`POST /manager/model-versions/{version_id}/artifacts`；`POST /manager/metrics`；`PUT /manager/model-versions/{version_id}/metrics`；`POST /manager/model-versions/{version_id}/publish`；`PUT /manager/channels/{channel}/models/{model_id}/selection`。普通查询为 `GET /{channel}/models`。
 
-正式 `ppg.active.offline.hr_br.v1` 已注册，可用空参数、零制品和零健康资料发布；输入逻辑名为 `ppg`，投影指标使用 `hr`／`br` 及其固定单位。实现规则见[PPG 主动离线 HR/BR v1](algorithms/ppg-active-offline-hr-br-v1.md)，其 `isExample` 为 `false`，不提供无修订号别名。
+正式 `ppg.active.offline.hr_br.v1` 已注册，可用空参数、零制品和零健康资料发布；输入逻辑名为 `ppg`，投影指标使用 `hr`／`br` 及其固定单位。实现规则见[PPG 主动离线 HR/BR v1](algorithms/ppg-active-offline-hr-br-v1.md)。
+
+正式 `ppg.active.offline.spo2.v1` 也已注册，要求 `ppg` 输入、空参数及 `spo2`、`feature_names`、`stable_features` 三个模型制品，投影指标为 `spo2`／`percent`，不要求健康资料。实现规则见[PPG 主动离线血氧 v1](algorithms/ppg-active-offline-spo2-v1.md)。两个算法均由代码定义 `isExample=false`，不提供无修订号别名。
 
 ### 算法报告质量拒绝
 
@@ -153,15 +159,25 @@ curl --include --request PUT "$API/manager/model-versions/$VERSION_ID/metrics" \
   --data '{"metricCodes":["hr","br"]}'
 ```
 
-发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且文件存在，以及所有已选指标的代码、值类型和单位。正式 PPG v1 不需要模型制品；其他算法是否需要制品以其注册契约为准。发布成功后算法、参数、制品和指标集合不可原地修改；重复发布返回原发布时间。
+发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且物理文件存在，以及所有已选指标的代码、值类型和单位。HR/BR v1 不需要模型制品；SPO2 v1 必须上传 `spo2`、`feature_names` 和 `stable_features`；其他算法按各自注册契约处理。发布成功后算法、参数、制品和指标集合不可原地修改；重复发布返回原发布时间。
 
-仅当执行器声明了制品时才上传；`logicalName` 必须与算法契约中的名称完全一致，文件名不会用于构造存储路径：
+算法通过 `input_extensions` 与 `artifact_extensions` 为每个逻辑名声明允许的后缀集合；映射键必须分别与 `required_inputs`、`required_artifacts` 完全一致。后缀使用不带点号的小写扩展名，并在注册时校验。当前正式契约如下：
+
+|算法|输入后缀|制品后缀|
+|---|---|---|
+|`ppg.active.offline.hr_br.v1`|`ppg: csv`|无|
+|`ppg.active.offline.spo2.v1`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`|
+
+上传端只从客户端文件名提取最后一个后缀并转为小写进行白名单校验；客户端路径、完整文件名和 MIME 不决定存储键。扩展名不证明文件内容有效，CSV 仍由算法解析，ONNX 与 JSON 仍由版本资源加载器校验。
+
+
+仅当执行器声明了制品时才上传；`logicalName` 必须与算法契约中的名称完全一致。文件名只用于提取并校验格式后缀，不用于构造存储路径。血氧模型及清单分别使用 `.onnx` 和 `.json`：
 
 ```sh
 curl --include --request POST "$API/manager/model-versions/$VERSION_ID/artifacts" \
   --header "Authorization: Bearer $MANAGER_ACCESS" \
-  --form 'logicalName=weights' \
-  --form 'file=@./weights.bin'
+  --form 'logicalName=spo2' \
+  --form 'file=@./spo2.onnx'
 ```
 
 

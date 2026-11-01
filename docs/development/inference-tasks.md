@@ -22,14 +22,16 @@ curl --include --request POST "$API/$CHANNEL/tasks" \
 
 ```sh
 TASK_ID='<创建响应中的 data.taskId>'
-PPG_FILE='/本机路径/符合正式 PPG v1 输入条件的文件.csv'
+PPG_FILE='/本机路径/符合所选 PPG 算法契约的文件.csv'
 curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/files" \
   --header "Authorization: Bearer $ACCESS_TOKEN" \
   --form 'logicalName=ppg' \
   --form "file=@$PPG_FILE"
 ```
 
-逻辑名必须来自模型目录返回的算法输入契约；正式 PPG v1 使用 `ppg`。上传文件应满足[正式算法的 CSV 格式、采样率和滤波长度要求](algorithms/ppg-active-offline-hr-br-v1.md)，仓库不附带可直接用于此算法的短样例。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
+逻辑名必须来自模型目录返回的算法输入契约；当前正式 HR/BR 与 SPO2 v1 均使用 `ppg`。上传文件应满足对应算法文档中的共享 CSV 格式和专属采样率、长度等条件：[HR/BR v1](algorithms/ppg-active-offline-hr-br-v1.md)、[SPO2 v1](algorithms/ppg-active-offline-spo2-v1.md)。仓库不附带可直接上传的健康数据样例。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
+
+新输入存储路径按任务创建时间生成，而不是按上传时间：日期目录和文件名前缀使用同一次 `Asia/Shanghai` 转换，格式为 `yyyyMMdd` 和 `yyyyMMdd_HHmmss`。文件名包含 `task_id`、`user_id`、固定算法 key、逻辑名和 UUID；客户端原始文件名不写入路径，只从其最后一个扩展名提取并按算法契约校验。跨日上传仍归入任务创建日期，同名重传使用新 UUID，旧文件继续保留。路径编码、模型制品布局和存量读取规则见[运行环境中的本地文件目录约定](environment.md#新文件目录与命名)。路径字段用于运维辨认归属，不替代数据库权限检查，也不能单独恢复任务的模型参数或资料快照。
 
 最终提交不接收请求体：
 
@@ -102,5 +104,5 @@ curl --fail --show-error --output ./result-output.bin \
   --header "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-成功下载返回 `FileResponse` 原始文件字节，不使用 JSON 业务包装；令牌渠道与请求路径不一致返回 403，任务账号或来源渠道不匹配、未知文件或逻辑名、缺失物理文件及失败／失租输出返回安全 404，不暴露存储路径。没有已登记 `output_files` 的成功结果不提供输出下载。
+成功下载返回 `FileResponse` 原始文件字节，不使用 JSON 业务包装；令牌渠道与请求路径不一致返回 403，任务账号或来源渠道不匹配、未知文件或逻辑名、缺失物理文件及失败／失租输出返回安全 404，不暴露存储路径。正式目录 `<渠道代码>/<任务创建日期>/outputs/<task_id>/` 是服务端维护的相对目录链接，不是下载授权依据；输出下载会尝试幂等恢复该链接，但仍直接打开数据库结果中的实际 `storage_key`。恢复链接失败但实际文件仍存在时下载继续成功，文件本身缺失时返回安全 404；恢复不重跑算法，旧结果继续按原登记键读取。
 
