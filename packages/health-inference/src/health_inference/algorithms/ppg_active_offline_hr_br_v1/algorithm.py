@@ -1,6 +1,6 @@
 """装配并公开正式 PPG HR/BR v1 算法契约。"""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.build_output import (
     build_output,
@@ -9,10 +9,6 @@ from health_inference.algorithms.ppg_active_offline_hr_br_v1.build_output import
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.inference import (
     RawPrediction,
     estimate_rates,
-)
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import (
-    PPGInput,
-    load_ppg,
 )
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
     PreprocessedPPG,
@@ -29,7 +25,9 @@ from health_inference.types import (
     InferenceInput,
     InferenceOutput,
     MetricContract,
+    VersionResources,
 )
+from health_inference.utils.ppg_input import PPGInput, load_ppg
 
 ALGORITHM_KEY = "ppg.active.offline.hr_br.v1"
 
@@ -64,15 +62,25 @@ _PIPELINE = OfflinePipeline[PPGInput, PreprocessedPPG, PPGQualityResult, RawPred
     build_output=_build_output,
 )
 
+
+def _create_runtime(
+    _: VersionResources,
+) -> Callable[[InferenceInput], InferenceOutput]:
+    """为无模型制品的 HR/BR 版本装配无状态流水线。"""
+    return _PIPELINE
+
+
 PPG_ACTIVE_OFFLINE_HR_BR_V1 = AlgorithmDefinition(
     key=ALGORITHM_KEY,
     is_example=False,
     required_inputs=("ppg",),
     required_artifacts=(),
+    input_extensions={"ppg": frozenset({"csv"})},
+    artifact_extensions={},
     required_profile_fields=(),
     parameter_validator=_validate_parameters,
     result_validator=valid_output,
-    runner=_PIPELINE,
+    resource_factory=_create_runtime,
     metric_contracts=(
         MetricContract("hr", "number", "beats_per_minute"),
         MetricContract("br", "number", "breaths_per_minute"),

@@ -5,11 +5,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.inference import RawPrediction
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import PPGInput
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import PreprocessedPPG
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.quality import PPGQualityResult
 from health_inference.exceptions import InferenceError
 from health_inference.types import InferenceInput, InferenceOutput
+from health_inference.utils.ppg_input import PPGInput
 
 _HR_METRIC = "hr"
 _BR_METRIC = "br"

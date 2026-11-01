@@ -4,7 +4,6 @@ import math
 
 import pytest
 from health_inference import QualityRejectedError
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import PPGInput
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
     preprocess_ppg,
 )
@@ -15,6 +14,7 @@ from health_inference.algorithms.ppg_active_offline_hr_br_v1.quality import (
     _quality_result_from_score,
 )
 from health_inference.quality import LowScoreDetails
+from health_inference.utils.ppg_input import PPGInput
 
 
 def _prepared_signal():

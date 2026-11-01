@@ -132,6 +132,7 @@ from health_inference import (
     QualityRejectedError,
     QualityRejection,
     QualityRejectionReason,
+    VersionResources,
 )
 
 for reason in QualityRejectionReason:
@@ -139,24 +140,30 @@ for reason in QualityRejectionReason:
         reason,
         LowScoreDetails(40, 70) if reason is QualityRejectionReason.LOW_SCORE else None,
     )
-    predictions = []
-
-    def runner(_):
+    def executor(_):
         raise QualityRejectedError(rejection)
-        predictions.append("prediction")
-        return InferenceOutput({}, {}, {})
 
     algorithm = AlgorithmDefinition(
-        "isolated-test", False, (), (), (), lambda _: None, lambda _: None, runner, ()
+        key="isolated-test",
+        is_example=False,
+        required_inputs=(),
+        required_artifacts=(),
+        input_extensions={},
+        artifact_extensions={},
+        required_profile_fields=(),
+        parameter_validator=lambda _: None,
+        result_validator=lambda _: None,
+        resource_factory=lambda _: executor,
+        metric_contracts=(),
     )
+    runtime = algorithm.create_runtime(VersionResources({}, {}))
     try:
-        algorithm.run(InferenceInput({}, {}, {}, {}, Path(".")))
+        runtime.run(InferenceInput({}, {}, {}, {}, Path(".")))
     except QualityRejectedError as error:
         assert error.code == "INFERENCE.QUALITY_REJECTED"
         assert error.rejection == rejection
     else:
         raise AssertionError("质量拒绝未传播")
-    assert predictions == []
 print("quality rejection process ok")
 """
     process = subprocess.run(

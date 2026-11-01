@@ -55,12 +55,12 @@ def _empty_result(_: InferenceInput) -> InferenceOutput:
     return InferenceOutput(payload={"ok": True}, metrics={}, output_files={})
 
 
-def _unexpected_profile_runner(_: InferenceInput) -> InferenceOutput:
+def _unexpected_profile_executor(_: InferenceInput) -> InferenceOutput:
     """若适配器以实时资料补值则立即失败。"""
     raise AssertionError("缺失快照不得执行算法")
 
 
-def _artifact_size_runner(inference_input: InferenceInput) -> InferenceOutput:
+def _artifact_size_executor(inference_input: InferenceInput) -> InferenceOutput:
     """返回实际读取的测试制品大小。"""
     return InferenceOutput(
         payload={"artifact_size": inference_input.artifacts["weights"].stat().st_size},
@@ -69,7 +69,7 @@ def _artifact_size_runner(inference_input: InferenceInput) -> InferenceOutput:
     )
 
 
-def _optional_device_model_runner(inference_input: InferenceInput) -> InferenceOutput:
+def _optional_device_model_executor(inference_input: InferenceInput) -> InferenceOutput:
     """仅在算法契约声明时读取可选设备型号键。"""
     metadata = inference_input.client_metadata
     return InferenceOutput(
@@ -86,7 +86,9 @@ def _register_test_algorithm(
     *,
     required_artifacts: tuple[str, ...] = (),
     required_profile_fields: tuple[str, ...] = (),
-    runner=_empty_result,
+    executor=_empty_result,
+    parameter_validator=_accept_empty_parameters,
+    resource_factory=None,
 ) -> str:
     """注册只用于本次集成场景的唯一纯 Python 算法。"""
     key = f"test.adapter.{uuid4().hex}"
@@ -96,10 +98,16 @@ def _register_test_algorithm(
             is_example=False,
             required_inputs=(),
             required_artifacts=required_artifacts,
+            input_extensions={},
+            artifact_extensions={
+                name: frozenset({"bin"}) for name in required_artifacts
+            },
             required_profile_fields=required_profile_fields,
-            parameter_validator=_accept_empty_parameters,
+            parameter_validator=parameter_validator,
             result_validator=_accept_result,
-            runner=runner,
+            resource_factory=(
+                resource_factory if resource_factory is not None else lambda _: executor
+            ),
             metric_contracts=(),
         )
     )
@@ -156,9 +164,16 @@ def _create_running_task(
 
 def _store_ppg(storage: LocalFileStorage, task: Task, csv_content: str) -> None:
     """保存并登记任务唯一选中的 PPG 输入文件。"""
-    stored = storage.save_upload(
+    stored = storage.save_task_input(
         BytesIO(csv_content.encode()),
-        area=StorageArea.TASK_DATA,
+        source_filename=f"{task.pk}.csv",
+        allowed_extensions=frozenset({"csv"}),
+        created_at=task.created_at,
+        task_id=task.pk,
+        user_id=task.user_id,
+        channel=task.channel.label,
+        algorithm_key=task.model_version.algorithm_key,
+        logical_name="ppg",
         max_bytes=1024 * 1024,
     )
     TaskInputFile.objects.create(
@@ -304,13 +319,128 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
             with first_rsp.open(encoding="utf-8") as output:
                 assert output.readline().rstrip("\r\n") == "timestamp,rsp"
             assert (
-                storage.task_data_root / "outputs" / str(first_task.pk) / first_token.hex
+                storage.task_data_root
+                / ".executions"
+                / str(first_task.pk)
+                / first_token.hex
             ).is_dir()
             assert (
-                storage.task_data_root / "outputs" / str(second_task.pk) / second_token.hex
+                storage.task_data_root
+                / ".executions"
+                / str(second_task.pk)
+                / second_token.hex
             ).is_dir()
     finally:
         clear_version_runtime_cache()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_version_runtime_is_cached_per_version_without_task_state(tmp_path):
+    """同版本复用固定资源，不同版本和任务元数据保持隔离。"""
+    created_markers = []
+
+    def validate_marker(params):
+        """仅接受两个发布测试版本的固定标记。"""
+        if set(params) != {"marker"} or params["marker"] not in {"A", "B"}:
+            raise ValueError("版本标记无效")
+
+    def create_executor(resources):
+        """按固定版本资源创建携带版本标记的执行器。"""
+        marker = resources.params["marker"]
+        created_markers.append(marker)
+
+        def execute(inference_input):
+            """返回固定版本标记和本次任务元数据。"""
+            metadata = inference_input.client_metadata
+            assert metadata is not None
+            return InferenceOutput(
+                payload={
+                    "version_marker": marker,
+                    "task_marker": metadata["task_marker"],
+                },
+                metrics={},
+                output_files={},
+            )
+
+        return execute
+
+    algorithm_key = _register_test_algorithm(
+        parameter_validator=validate_marker,
+        resource_factory=create_executor,
+    )
+    clear_version_runtime_cache()
+    try:
+        with override_settings(
+            TASK_DATA_ROOT=tmp_path / "tasks",
+            MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        ):
+            model = create_model(
+                code=f"adapter-runtime-{uuid4().hex}",
+                name="Runtime adapter",
+                description=None,
+            )
+            first_draft = create_model_version(
+                model_id=model.model_id,
+                version="1.0",
+                algorithm_key=algorithm_key,
+                params={"marker": "A"},
+            )
+            first_version = publish_model_version(version_id=first_draft.version_id)
+            second_draft = create_model_version(
+                model_id=model.model_id,
+                version="2.0",
+                algorithm_key=algorithm_key,
+                params={"marker": "B"},
+            )
+            second_version = publish_model_version(version_id=second_draft.version_id)
+            select_channel_model_version(
+                channel="ios-cn",
+                model_id=model.model_id,
+                version_id=first_version.version_id,
+            )
+            user = get_user_model().objects.create_user(
+                username=f"adapter-runtime-{uuid4().hex}",
+                password="Dawn-valley-483!strong",
+            )
+            first_task, first_token = _create_running_task(
+                user=user,
+                version_id=first_version.version_id,
+                profile_snapshot={},
+                client_metadata={"task_marker": "first-A"},
+            )
+            second_task, second_token = _create_running_task(
+                user=user,
+                version_id=second_version.version_id,
+                profile_snapshot={},
+                client_metadata={"task_marker": "B"},
+            )
+            third_task, third_token = _create_running_task(
+                user=user,
+                version_id=first_version.version_id,
+                profile_snapshot={},
+                client_metadata={"task_marker": "second-A"},
+            )
+            select_channel_model_version(
+                channel="ios-cn",
+                model_id=model.model_id,
+                version_id=second_version.version_id,
+            )
+
+            results = [
+                run_task_inference(task_id=first_task.pk, execution_token=first_token),
+                run_task_inference(task_id=second_task.pk, execution_token=second_token),
+                run_task_inference(task_id=third_task.pk, execution_token=third_token),
+            ]
+    finally:
+        clear_version_runtime_cache()
+
+    assert [result.payload["version_marker"] for result in results] == ["A", "B", "A"]
+    assert [result.payload["task_marker"] for result in results] == [
+        "first-A",
+        "B",
+        "second-A",
+    ]
+    assert created_markers == ["A", "B"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -318,7 +448,7 @@ def test_missing_snapshot_field_does_not_fall_back_to_current_profile(tmp_path):
     """必需资料缺失时明确失败，即使账号当前资料已有该字段。"""
     algorithm_key = _register_test_algorithm(
         required_profile_fields=("name",),
-        runner=_unexpected_profile_runner,
+        executor=_unexpected_profile_executor,
     )
     _, version_id = _create_published_version(algorithm_key=algorithm_key)
     user = get_user_model().objects.create_user(
@@ -353,7 +483,7 @@ def test_releasing_version_cache_does_not_delete_model_artifact(tmp_path):
     """释放进程内版本缓存不会删除仍登记的模型制品文件。"""
     algorithm_key = _register_test_algorithm(
         required_artifacts=("weights",),
-        runner=_artifact_size_runner,
+        executor=_artifact_size_executor,
     )
     clear_version_runtime_cache()
     try:
@@ -380,6 +510,7 @@ def test_releasing_version_cache_does_not_delete_model_artifact(tmp_path):
             artifact = upload_model_artifact(
                 version_id=draft.version_id,
                 logical_name="weights",
+                source_filename="weights.bin",
                 source=BytesIO(b"immutable model artifact"),
             )
             version = publish_model_version(version_id=draft.version_id)
@@ -422,7 +553,7 @@ def test_algorithm_can_consume_optional_client_metadata_keys(tmp_path):
             MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         ):
             algorithm_key = _register_test_algorithm(
-                runner=_optional_device_model_runner,
+                executor=_optional_device_model_executor,
             )
             _, version_id = _create_published_version(algorithm_key=algorithm_key)
             user = get_user_model().objects.create_user(

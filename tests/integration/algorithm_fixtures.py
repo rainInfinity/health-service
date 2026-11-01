@@ -43,10 +43,12 @@ register_algorithm(
         is_example=False,
         required_inputs=("ppg",),
         required_artifacts=(),
+        input_extensions={"ppg": frozenset({"csv"})},
+        artifact_extensions={},
         required_profile_fields=(),
         parameter_validator=_allow_parameters,
         result_validator=_validate_result,
-        runner=_run_completed,
+        resource_factory=lambda _: _run_completed,
         metric_contracts=(),
     )
 )
@@ -56,10 +58,12 @@ register_algorithm(
         is_example=False,
         required_inputs=("ppg",),
         required_artifacts=(),
+        input_extensions={"ppg": frozenset({"csv"})},
+        artifact_extensions={},
         required_profile_fields=(),
         parameter_validator=_allow_parameters,
         result_validator=_validate_result,
-        runner=_run_completed_with_metric,
+        resource_factory=lambda _: _run_completed_with_metric,
         metric_contracts=(MetricContract(TEST_METRIC_CODE, "number", "count"),),
     )
 )

@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.build_output import valid_output
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import load_ppg
 from health_inference.exceptions import (
     InferenceError,
     InputError,
     InputErrorReason,
 )
 from health_inference.types import InferenceOutput
+from health_inference.utils.ppg_input import load_ppg
 from health_service.application.execution import _safe_failure_fields
 
 

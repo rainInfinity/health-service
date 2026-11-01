@@ -5,11 +5,11 @@ from typing import Literal
 
 import numpy as np
 import pytest
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import PPGInput
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
     preprocess_ppg,
 )
 from health_inference.exceptions import InputError, InputErrorReason
+from health_inference.utils.ppg_input import PPGInput
 
 
 def _signal_input(

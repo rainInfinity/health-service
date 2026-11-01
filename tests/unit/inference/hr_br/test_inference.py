@@ -6,10 +6,10 @@ import pytest
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.inference import (
     estimate_rates,
 )
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import PPGInput
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
     preprocess_ppg,
 )
+from health_inference.utils.ppg_input import PPGInput
 
 
 def _estimate(heart_rate_hz: float, sampling_rate_hz: float):

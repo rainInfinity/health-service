@@ -1,4 +1,4 @@
-"""读取并校验 HR/BR v1 所需的单块 PPG CSV 输入。"""
+"""提供跨算法共用的单块 RGB/YUV PPG CSV 读取与校验。"""
 
 import math
 import warnings

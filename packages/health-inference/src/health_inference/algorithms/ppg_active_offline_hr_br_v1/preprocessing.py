@@ -6,8 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import PPGInput
 from health_inference.exceptions import InputError, InputErrorReason
+from health_inference.utils.ppg_input import PPGInput
 
 if TYPE_CHECKING:
     import numpy as np

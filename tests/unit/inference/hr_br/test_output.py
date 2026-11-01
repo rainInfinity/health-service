@@ -11,14 +11,15 @@ from health_inference import (
     PPG_ACTIVE_OFFLINE_HR_BR_V1,
     InferenceInput,
     QualityRejectedError,
+    VersionResources,
 )
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.algorithm import _PIPELINE
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.inference import RawPrediction
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.load_input import load_ppg
 from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
     preprocess_ppg,
 )
 from health_inference.exceptions import InferenceError
+from health_inference.utils.ppg_input import load_ppg
 
 
 def _write_signal_csv(
@@ -66,7 +67,8 @@ def test_success_payload_metrics_and_processed_csvs_match_input(tmp_path):
     timestamps_ms = _write_signal_csv(input_path)
     inference_input = _inference_input(input_path, output_dir)
 
-    result = PPG_ACTIVE_OFFLINE_HR_BR_V1.run(inference_input)
+    runtime = PPG_ACTIVE_OFFLINE_HR_BR_V1.create_runtime(VersionResources({}, {}))
+    result = runtime.run(inference_input)
 
     assert set(result.payload) == {"hr", "br", "quality"}
     assert math.isfinite(result.payload["hr"])
@@ -105,12 +107,9 @@ def test_separate_executions_write_to_distinct_directories(tmp_path):
     _write_signal_csv(input_one, heart_rate_hz=1.2)
     _write_signal_csv(input_two, heart_rate_hz=1.5)
 
-    result_one = PPG_ACTIVE_OFFLINE_HR_BR_V1.run(
-        _inference_input(input_one, tmp_path / "execution-one")
-    )
-    result_two = PPG_ACTIVE_OFFLINE_HR_BR_V1.run(
-        _inference_input(input_two, tmp_path / "execution-two")
-    )
+    runtime = PPG_ACTIVE_OFFLINE_HR_BR_V1.create_runtime(VersionResources({}, {}))
+    result_one = runtime.run(_inference_input(input_one, tmp_path / "execution-one"))
+    result_two = runtime.run(_inference_input(input_two, tmp_path / "execution-two"))
 
     ppg_one = result_one.output_files["processed_ppg"]
     ppg_two = result_two.output_files["processed_ppg"]
@@ -127,7 +126,8 @@ def test_quality_rejection_creates_no_success_file_references(tmp_path):
     inference_input = _inference_input(input_path, output_dir)
 
     with pytest.raises(QualityRejectedError) as error:
-        PPG_ACTIVE_OFFLINE_HR_BR_V1.run(inference_input)
+        runtime = PPG_ACTIVE_OFFLINE_HR_BR_V1.create_runtime(VersionResources({}, {}))
+        runtime.run(inference_input)
 
     assert error.value.rejection.reason.value == "LOW_SCORE"
     assert tuple(output_dir.iterdir()) == ()
