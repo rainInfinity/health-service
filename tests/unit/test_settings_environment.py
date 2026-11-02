@@ -44,6 +44,7 @@ print(json.dumps({
     "inference_group": settings.INFERENCE_GROUP,
     "inference_lease_seconds": settings.INFERENCE_LEASE_SECONDS,
     "inference_heartbeat_seconds": settings.INFERENCE_HEARTBEAT_SECONDS,
+    "inference_execution_timeout_seconds": settings.INFERENCE_EXECUTION_TIMEOUT_SECONDS,
     "inference_dispatch_interval_seconds": settings.INFERENCE_DISPATCH_INTERVAL_SECONDS,
     "inference_max_attempts": settings.INFERENCE_MAX_ATTEMPTS,
     "inference_poll_milliseconds": settings.INFERENCE_POLL_MILLISECONDS,
@@ -93,6 +94,7 @@ def _run_settings(
             "INFERENCE_GROUP",
             "INFERENCE_LEASE_SECONDS",
             "INFERENCE_HEARTBEAT_SECONDS",
+            "INFERENCE_EXECUTION_TIMEOUT_SECONDS",
             "INFERENCE_DISPATCH_INTERVAL_SECONDS",
             "INFERENCE_MAX_ATTEMPTS",
             "INFERENCE_POLL_MILLISECONDS",
@@ -328,6 +330,7 @@ def test_inference_settings_defaults_create_project_relative_roots(tmp_path: Pat
     assert settings["inference_group"] == "health-inference"
     assert settings["inference_lease_seconds"] == 60
     assert settings["inference_heartbeat_seconds"] == 10
+    assert settings["inference_execution_timeout_seconds"] == 300
     assert settings["inference_dispatch_interval_seconds"] == 30
     assert settings["inference_max_attempts"] == 3
     assert settings["inference_poll_milliseconds"] == 1000
@@ -360,6 +363,8 @@ def test_inference_process_configuration_overrides_dotenv(tmp_path: Path):
         ("MAX_UPLOAD_BYTES", "0"),
         ("INFERENCE_LEASE_SECONDS", "-1"),
         ("INFERENCE_HEARTBEAT_SECONDS", "0"),
+        ("INFERENCE_EXECUTION_TIMEOUT_SECONDS", "0"),
+        ("INFERENCE_EXECUTION_TIMEOUT_SECONDS", "1.5"),
         ("INFERENCE_DISPATCH_INTERVAL_SECONDS", "invalid"),
         ("INFERENCE_MAX_ATTEMPTS", "0"),
         ("INFERENCE_POLL_MILLISECONDS", "0"),

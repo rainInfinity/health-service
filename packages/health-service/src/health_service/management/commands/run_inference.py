@@ -25,6 +25,7 @@ from health_service.application.execution import (
     save_task_execution_success,
 )
 from health_service.inference_logging import log_inference_event
+from health_service.infrastructure.execution_process import InferenceExecutionProcess
 from health_service.infrastructure.inference_adapter import (
     clear_version_runtime_cache,
     run_task_inference,
@@ -58,10 +59,15 @@ class Command(BaseCommand):
         self._worker_error_recorded = False
         self._log_event("inference.worker.starting")
         client = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        self._execution_process = InferenceExecutionProcess(
+            run_task_inference,
+            timeout_seconds=settings.INFERENCE_EXECUTION_TIMEOUT_SECONDS,
+        )
         self._claim_cursor = "0-0"
         self._shutdown_event = Event()
         previous_handlers = self._install_shutdown_signal_handlers()
         try:
+            self._execution_process.start()
             _ensure_consumer_group(client)
             ready = False
             while not self._shutdown_event.is_set():
@@ -79,9 +85,12 @@ class Command(BaseCommand):
             self._record_worker_error(error)
             raise CommandError("推理消费者的 Redis 操作失败") from error
         finally:
-            clear_version_runtime_cache()
-            self._restore_shutdown_signal_handlers(previous_handlers)
-            client.close()
+            try:
+                self._execution_process.close()
+            finally:
+                clear_version_runtime_cache()
+                self._restore_shutdown_signal_handlers(previous_handlers)
+                client.close()
         self._log_event("inference.worker.stopped")
 
     def _log_event(self, event: str, **fields) -> None:
@@ -226,7 +235,7 @@ class Command(BaseCommand):
         failed = False
         failure_code = None
         try:
-            result = run_task_inference(
+            result = self._execution_process.execute(
                 task_id=task_id,
                 execution_token=execution_token,
             )

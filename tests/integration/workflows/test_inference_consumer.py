@@ -5,11 +5,11 @@ import csv
 import json
 import math
 import os
-import signal
 from datetime import datetime, timedelta
+from functools import partial
 from io import BytesIO, StringIO
+from multiprocessing import get_context
 from pathlib import Path
-from time import sleep
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -23,16 +23,11 @@ from django.db import OperationalError, connections
 from django.test import AsyncClient, override_settings
 from django.utils import timezone
 from health_inference import (
-    AlgorithmDefinition,
-    InferenceInput,
-    InferenceOutput,
     LowScoreDetails,
-    QualityRejectedError,
     QualityRejection,
     QualityRejectionReason,
 )
 from health_inference.exceptions import InputError, InputErrorReason
-from health_inference.registry import _ALGORITHMS
 from health_service.application.catalog import (
     create_metric_definition,
     create_model,
@@ -51,9 +46,6 @@ from health_service.infrastructure.inference_adapter import (
     _version_runtime,
     clear_version_runtime_cache,
 )
-from health_service.infrastructure.inference_adapter import (
-    run_task_inference as run_actual_task_inference,
-)
 from health_service.infrastructure.storage import LocalFileStorage, StorageArea
 from health_service.management.commands import run_inference as inference_command
 from health_service.models import Channel, Task, TaskInputFile, TaskMetric
@@ -62,6 +54,14 @@ from redis import Redis
 from tests.integration.algorithm_fixtures import (
     TEST_METRIC_ALGORITHM_KEY,
     TEST_METRIC_CODE,
+    raise_test_quality_rejection,
+    raise_test_quality_rejection_after_delay,
+    raise_test_unexpected_inference,
+    run_delayed_test_task_inference,
+    run_test_task_inference,
+    run_test_task_inference_after_parent_signal,
+    run_test_task_inference_recording_pid,
+    run_test_task_inference_until_timeout,
 )
 from tests.integration.ppg_inputs import synthetic_ppg_csv
 from tests.log_records import parse_console_records
@@ -70,11 +70,18 @@ _PPG_CSV = "timestampFrame,avgR,avgG,avgB\n0,1,2,3\n500,2,3,4\n1000,3,4,5\n1500,
 _TEST_METRICS = ((TEST_METRIC_CODE, "count"),)
 
 
+
+
 @pytest.fixture
-def inference_stream():
-    """为单个测试创建唯一 Stream 和消费组，并只清理该测试键。"""
+def inference_stream(monkeypatch):
+    """为测试创建唯一 Stream、消费组及可导入的执行器。"""
     stream = f"test:health:consumer:{uuid4().hex}"
     group = f"test-group-{uuid4().hex}"
+    monkeypatch.setattr(
+        inference_command,
+        "run_task_inference",
+        run_test_task_inference,
+    )
     client = Redis.from_url(settings.REDIS_URL, decode_responses=True)
     try:
         with override_settings(INFERENCE_STREAM=stream, INFERENCE_GROUP=group):
@@ -184,77 +191,8 @@ def _create_metric_task_for_version(version_id: int) -> Task:
     return task
 
 
-@pytest.fixture
-def isolated_quality_algorithm(monkeypatch):
-    """临时装入拒绝算法并在测试后清理版本运行时缓存。"""
-    algorithm_key = f"test.quality.{uuid4().hex}"
-    scheduled_rejections: list[QualityRejection] = []
-    invocations: list[QualityRejection] = []
-
-    def reject_quality(_: InferenceInput) -> InferenceOutput:
-        """触发本测试指定的质量拒绝并记录执行次数。"""
-        if not scheduled_rejections:
-            raise AssertionError("测试未指定质量拒绝")
-        rejection = scheduled_rejections[0]
-        invocations.append(rejection)
-        error = QualityRejectedError(rejection)
-        error.args = ("PRIVATE-QUALITY-SENTINEL",)
-        error.safe_message = "PRIVATE-QUALITY-SENTINEL"
-        raise error
-
-    definition = AlgorithmDefinition(
-        key=algorithm_key,
-        is_example=False,
-        required_inputs=(),
-        required_artifacts=(),
-        input_extensions={},
-        artifact_extensions={},
-        required_profile_fields=(),
-        parameter_validator=lambda _: None,
-        result_validator=lambda _: None,
-        resource_factory=lambda _: reject_quality,
-        metric_contracts=(),
-    )
-    clear_version_runtime_cache()
-    monkeypatch.setitem(_ALGORITHMS, algorithm_key, definition)
-    try:
-        yield algorithm_key, scheduled_rejections, invocations
-    finally:
-        clear_version_runtime_cache()
 
 
-def _create_quality_rejection_task(*, algorithm_key: str) -> Task:
-    """为临时质量算法创建无输入、无指标的待执行任务。"""
-    user = get_user_model().objects.create_user(
-        username=f"consumer-quality-{uuid4().hex}",
-        password="Dawn-valley-483!strong",
-    )
-    model = create_model(
-        code=f"consumer-quality-{uuid4().hex}",
-        name="Quality rejection test",
-        description=None,
-    )
-    draft = create_model_version(
-        model_id=model.model_id,
-        version="1.0",
-        algorithm_key=algorithm_key,
-        params=None,
-    )
-    version = publish_model_version(version_id=draft.version_id)
-    select_channel_model_version(
-        channel="ios-cn",
-        model_id=model.model_id,
-        version_id=version.version_id,
-    )
-    now = timezone.now()
-    return Task.objects.create(
-        user=user,
-        channel=Channel.objects.get(label="ios-cn"),
-        model_version_id=version.version_id,
-        status=Task.StatusChoices.SUBMITTED,
-        profile_snapshot={},
-        submitted_at=now,
-    )
 
 
 def _run_once(consumer: str = "test-consumer") -> None:
@@ -483,7 +421,6 @@ def test_registered_client_metadata_tasks_execute_end_to_end(
 def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
     tmp_path,
     inference_stream,
-    isolated_quality_algorithm,
     monkeypatch,
     capsys,
     rejection: QualityRejection,
@@ -491,8 +428,11 @@ def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
 ):
     """真实单轮消费者先提交拒绝，再确认重复任务消息且只执行一次。"""
     client, stream, group = inference_stream
-    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
-    scheduled_rejections.append(rejection)
+    monkeypatch.setattr(
+        inference_command,
+        "run_task_inference",
+        partial(raise_test_quality_rejection, rejection),
+    )
     actual_xack = Redis.xack
     task: Task
 
@@ -507,7 +447,7 @@ def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        task = _create_test_metric_task()
         client.xadd(stream, {"task_id": str(task.pk)})
         client.xadd(stream, {"task_id": str(task.pk)})
         _run_once()
@@ -521,7 +461,6 @@ def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
     assert task.execution_token is None
     assert task.lease_expires_at is None
     assert task.attempt_count == 1
-    assert invocations == [rejection]
     assert not TaskMetric.objects.filter(task=task).exists()
     assert client.xpending(stream, group)["pending"] == 0
 
@@ -560,14 +499,17 @@ def test_once_commits_quality_rejection_before_ack_and_acks_duplicates(
 def test_quality_rejection_runs_through_http_and_terminal_replay(
     tmp_path,
     inference_stream,
-    isolated_quality_algorithm,
+    monkeypatch,
     rejection: QualityRejection,
     expected_quality: dict[str, object],
 ):
     """串联单轮消费者、真实 HTTP 详情读取与已终态消息重放。"""
     redis_client, stream, group = inference_stream
-    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
-    scheduled_rejections.append(rejection)
+    monkeypatch.setattr(
+        inference_command,
+        "run_task_inference",
+        partial(raise_test_quality_rejection, rejection),
+    )
 
     async def query_detail(username: str, task_id: int):
         """通过登录接口认证并读取同一质量拒绝任务。"""
@@ -595,7 +537,7 @@ def test_quality_rejection_runs_through_http_and_terminal_replay(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        task = _create_test_metric_task()
         username = task.user.username
         redis_client.xadd(stream, {"task_id": str(task.pk)})
         _run_once()
@@ -613,7 +555,6 @@ def test_quality_rejection_runs_through_http_and_terminal_replay(
     assert task.result_payload is None
     assert task.finished_at is not None
     assert task.attempt_count == 1
-    assert invocations == [rejection]
     assert not TaskMetric.objects.filter(task=task).exists()
     assert redis_client.xpending(stream, group)["pending"] == 0
 
@@ -640,32 +581,26 @@ def test_quality_rejection_runs_through_http_and_terminal_replay(
 def test_quality_rejection_after_lease_loss_is_not_saved_or_acked(
     tmp_path,
     inference_stream,
-    isolated_quality_algorithm,
     monkeypatch,
     capsys,
 ):
     """测试算法报告拒绝时若已失权，消费者不写终态也不确认消息。"""
     client, stream, group = inference_stream
-    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
     rejection = QualityRejection(
         QualityRejectionReason.LOW_SCORE,
         LowScoreDetails(40, 70),
     )
-    scheduled_rejections.append(rejection)
 
-    def delayed_inference(*, task_id: int, execution_token):
-        """等待心跳判定失权后仍经真实适配器执行测试算法。"""
-        sleep(0.12)
-        return run_actual_task_inference(
-            task_id=task_id,
-            execution_token=execution_token,
-        )
+    monkeypatch.setattr(
+        inference_command,
+        "run_task_inference",
+        partial(raise_test_quality_rejection_after_delay, 0.12, rejection),
+    )
 
     def lose_lease(*, task_id: int, execution_token) -> bool:
         """模拟数据库租约续约拒绝。"""
         return False
 
-    monkeypatch.setattr(inference_command, "run_task_inference", delayed_inference)
     monkeypatch.setattr(inference_command, "renew_task_execution_lease", lose_lease)
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
@@ -673,7 +608,7 @@ def test_quality_rejection_after_lease_loss_is_not_saved_or_acked(
         INFERENCE_LEASE_SECONDS=0.3,
         INFERENCE_HEARTBEAT_SECONDS=0.03,
     ):
-        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        task = _create_test_metric_task()
         _run_once()
 
     task.refresh_from_db()
@@ -684,7 +619,6 @@ def test_quality_rejection_after_lease_loss_is_not_saved_or_acked(
     assert task.finished_at is None
     assert task.execution_token is not None
     assert task.attempt_count == 1
-    assert invocations == [rejection]
     assert client.xpending(stream, group)["pending"] == 1
 
     output = capsys.readouterr().out
@@ -701,7 +635,6 @@ def test_quality_rejection_after_lease_loss_is_not_saved_or_acked(
 def test_quality_rejection_ack_failure_replays_only_terminal_ack(
     tmp_path,
     inference_stream,
-    isolated_quality_algorithm,
     monkeypatch,
     capsys,
 ):
@@ -710,11 +643,14 @@ def test_quality_rejection_ack_failure_replays_only_terminal_ack(
     from redis.exceptions import ConnectionError as RedisConnectionError
 
     client, stream, group = inference_stream
-    algorithm_key, scheduled_rejections, invocations = isolated_quality_algorithm
     rejection = QualityRejection(QualityRejectionReason.NO_VALID_SIGNAL, None)
     expected_detail = {"quality": {"reason": "NO_VALID_SIGNAL", "details": None}}
-    scheduled_rejections.append(rejection)
     task: Task
+    monkeypatch.setattr(
+        inference_command,
+        "run_task_inference",
+        partial(raise_test_quality_rejection, rejection),
+    )
 
     def fail_ack(redis_client, *args, **kwargs):
         """确认前验证质量终态已落库，再模拟 Redis 确认故障。"""
@@ -726,7 +662,7 @@ def test_quality_rejection_ack_failure_replays_only_terminal_ack(
         TASK_DATA_ROOT=tmp_path / "tasks",
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
     ):
-        task = _create_quality_rejection_task(algorithm_key=algorithm_key)
+        task = _create_test_metric_task()
         with monkeypatch.context() as patch:
             patch.setattr(Redis, "xack", fail_ack)
             with pytest.raises(CommandError):
@@ -755,7 +691,6 @@ def test_quality_rejection_ack_failure_replays_only_terminal_ack(
     assert task.status == Task.StatusChoices.FAILED
     assert task.failure_detail == expected_detail
     assert task.attempt_count == 1
-    assert invocations == [rejection]
     assert client.xpending(stream, group)["pending"] == 0
     first_records = parse_console_records(first_output)
     replay_output = capsys.readouterr().out
@@ -950,17 +885,10 @@ def test_successful_terminal_message_recovers_outputs_without_rerunning(
                 "boolean_value",
             )
         )
-        run_calls: list[int] = []
-
-        def unexpected_inference(*, task_id: int, execution_token) -> None:
-            """检测终态消息是否错误地启动了算法。"""
-            run_calls.append(task_id)
-            raise AssertionError("终态任务不得重新执行")
-
         monkeypatch.setattr(
             inference_command,
             "run_task_inference",
-            unexpected_inference,
+            raise_test_unexpected_inference,
         )
         client.xadd(stream, {"task_id": str(task.pk)})
         _run_once("output-recovery")
@@ -977,7 +905,6 @@ def test_successful_terminal_message_recovers_outputs_without_rerunning(
         "output_files": {"report": output_key},
     }
     assert task.attempt_count == 1
-    assert run_calls == []
     assert (
         list(
             TaskMetric.objects.filter(task=task).values_list(
@@ -1007,18 +934,15 @@ def test_heartbeat_keeps_long_inference_lease_valid(tmp_path, inference_stream, 
         MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
         INFERENCE_LEASE_SECONDS=0.15,
         INFERENCE_HEARTBEAT_SECONDS=0.03,
+        INFERENCE_EXECUTION_TIMEOUT_SECONDS=1,
     ):
         task = _create_test_metric_task()
 
-        def slow_inference(*, task_id, execution_token):
-            """延迟后执行测试算法以跨越初始租约。"""
-            sleep(0.45)
-            return run_actual_task_inference(
-                task_id=task_id,
-                execution_token=execution_token,
-            )
-
-        monkeypatch.setattr(inference_command, "run_task_inference", slow_inference)
+        monkeypatch.setattr(
+            inference_command,
+            "run_task_inference",
+            partial(run_delayed_test_task_inference, 0.45),
+        )
         _run_once()
 
     task.refresh_from_db()
@@ -1027,6 +951,146 @@ def test_heartbeat_keeps_long_inference_lease_valid(tmp_path, inference_stream, 
     assert task.finished_at is not None
     assert client.xpending(stream, group)["pending"] == 0
 
+
+
+@pytest.mark.django_db(transaction=True)
+def test_consumer_reuses_execution_process_for_normal_tasks(
+    tmp_path,
+    inference_stream,
+    monkeypatch,
+):
+    """连续任务由同一子进程执行，以保留版本运行时缓存。"""
+    client, stream, group = inference_stream
+    process_ids = get_context("spawn").Queue()
+
+
+    try:
+        with override_settings(
+            TASK_DATA_ROOT=tmp_path / "tasks",
+            MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+            INFERENCE_EXECUTION_TIMEOUT_SECONDS=5,
+        ):
+            first_task = _create_test_metric_task()
+            second_task = _create_metric_task_for_version(first_task.model_version_id)
+            client.xadd(stream, {"task_id": str(first_task.pk)})
+            client.xadd(stream, {"task_id": str(second_task.pk)})
+            monkeypatch.setattr(
+                inference_command,
+                "run_task_inference",
+                partial(run_test_task_inference_recording_pid, process_ids),
+            )
+            _run_once()
+
+        first_task.refresh_from_db()
+        second_task.refresh_from_db()
+        assert first_task.status == Task.StatusChoices.SUCCEEDED
+        assert second_task.status == Task.StatusChoices.SUCCEEDED
+        child_process_ids = [process_ids.get(timeout=1) for _ in range(2)]
+        assert child_process_ids[0] == child_process_ids[1] != os.getpid()
+        assert client.xpending(stream, group)["pending"] == 0
+    finally:
+        process_ids.close()
+        process_ids.join_thread()
+
+
+@pytest.mark.parametrize("outcome", ["committed", "save-failed", "lease-lost"])
+@pytest.mark.django_db(transaction=True)
+def test_execution_timeout_kills_child_before_failure_ack(
+    tmp_path,
+    inference_stream,
+    monkeypatch,
+    outcome,
+):
+    """真实消费者超时先杀死算法进程，失败保存或失权均不确认消息。"""
+    client, stream, group = inference_stream
+    task_root = tmp_path / "tasks"
+    marker = tmp_path / "executor-pid"
+    actual_xack = Redis.xack
+    task: Task
+
+
+    def assert_executor_dead() -> None:
+        """确认执行子进程已被回收，而不是仅忽略其迟到结果。"""
+        process_id = int(marker.read_text(encoding="ascii").split()[0])
+        with pytest.raises(ProcessLookupError):
+            os.kill(process_id, 0)
+
+    def acknowledge_after_failure(redis_client, *args, **kwargs):
+        """确认 ACK 发生时超时失败已持久化且执行子进程已退出。"""
+        task.refresh_from_db()
+        assert task.status == Task.StatusChoices.FAILED
+        assert task.failure_code == "INFERENCE.EXECUTION_TIMEOUT"
+        assert task.failure_message == "推理执行超时"
+        assert_executor_dead()
+        assert task.attempt_count == 1
+        return actual_xack(redis_client, *args, **kwargs)
+
+    def skip_failure_save(**_kwargs):
+        """模拟当前执行令牌不能提交失败终态。"""
+
+    def lose_execution_lease(**_kwargs) -> bool:
+        """模拟心跳确认当前执行已失去所有权。"""
+        return False
+
+    monkeypatch.setattr(
+        inference_command,
+        "run_task_inference",
+        partial(run_test_task_inference_until_timeout, task_root, marker),
+    )
+    with override_settings(
+        TASK_DATA_ROOT=task_root,
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        INFERENCE_EXECUTION_TIMEOUT_SECONDS=1,
+        INFERENCE_LEASE_SECONDS=0.3,
+        INFERENCE_HEARTBEAT_SECONDS=0.03,
+    ):
+        task = _create_test_metric_task()
+        if outcome == "committed":
+            monkeypatch.setattr(Redis, "xack", acknowledge_after_failure)
+        elif outcome == "save-failed":
+            monkeypatch.setattr(
+                inference_command,
+                "record_task_execution_failure",
+                skip_failure_save,
+            )
+        else:
+            monkeypatch.setattr(
+                inference_command,
+                "renew_task_execution_lease",
+                lose_execution_lease,
+            )
+        _run_once()
+
+    task.refresh_from_db()
+    assert_executor_dead()
+    assert task.attempt_count == 1
+    assert task.result_payload is None
+    assert not TaskMetric.objects.filter(task=task).exists()
+    execution_token_hex = marker.read_text(encoding="ascii").split()[1]
+    execution_dir = (
+        task_root / ".executions" / str(task.pk) / execution_token_hex
+    )
+    assert (execution_dir / "partial-output.csv").read_text(encoding="utf-8") == "partial"
+    published_dir = (
+        task_root
+        / task.channel.label
+        / task.created_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+        / "outputs"
+        / str(task.pk)
+    )
+    assert not published_dir.exists()
+    if outcome == "committed":
+        assert task.status == Task.StatusChoices.FAILED
+        assert task.failure_code == "INFERENCE.EXECUTION_TIMEOUT"
+        assert task.failure_message == "推理执行超时"
+        assert task.execution_token is None
+        assert task.failure_detail is None
+        assert client.xpending(stream, group)["pending"] == 0
+    else:
+        assert task.status == Task.StatusChoices.RUNNING
+        assert task.failure_code is None
+        assert task.failure_message is None
+        assert client.xpending(stream, group)["pending"] == 1
 
 @pytest.mark.parametrize("heartbeat_failure", ["lease-lost", "database-error"])
 @pytest.mark.django_db(transaction=True)
@@ -1043,13 +1107,6 @@ def test_heartbeat_failure_never_writes_terminal_state_or_ack(
     ):
         task = _create_test_metric_task()
 
-        def slow_inference(*, task_id, execution_token):
-            """等待心跳线程完成失败判定后返回真实算法结果。"""
-            sleep(0.12)
-            return run_actual_task_inference(
-                task_id=task_id,
-                execution_token=execution_token,
-            )
 
         def fail_heartbeat(*, task_id, execution_token):
             """模拟租约被抢占或数据库暂时故障。"""
@@ -1057,7 +1114,11 @@ def test_heartbeat_failure_never_writes_terminal_state_or_ack(
                 raise OperationalError("不可持久化的数据库诊断")
             return False
 
-        monkeypatch.setattr(inference_command, "run_task_inference", slow_inference)
+        monkeypatch.setattr(
+            inference_command,
+            "run_task_inference",
+            partial(run_delayed_test_task_inference, 0.12),
+        )
         monkeypatch.setattr(
             inference_command,
             "renew_task_execution_lease",
@@ -1099,15 +1160,11 @@ def test_shutdown_signal_finishes_current_task_and_stops_batch(
         first_task = _create_test_metric_task()
         second_task = _create_metric_task_for_version(first_task.model_version_id)
 
-        def stop_after_start(*, task_id, execution_token):
-            """触发 SIGTERM 后继续完成已经开始的测试算法。"""
-            signal.raise_signal(signal.SIGTERM)
-            return run_actual_task_inference(
-                task_id=task_id,
-                execution_token=execution_token,
-            )
-
-        monkeypatch.setattr(inference_command, "run_task_inference", stop_after_start)
+        monkeypatch.setattr(
+            inference_command,
+            "run_task_inference",
+            run_test_task_inference_after_parent_signal,
+        )
         _run_once()
 
     first_task.refresh_from_db()
