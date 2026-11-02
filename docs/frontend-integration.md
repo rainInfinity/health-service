@@ -382,6 +382,121 @@ PATCH 请求示例：
 
 质量拒绝和其他失败均为终态；不要重试原任务，也不要把异常、非法评分或无效预测解释成质量通过或医学结论。
 
+### 6.3 PPG+ACC 主动离线血压 v1（`ppg_acc.active.offline.bp.v1`）
+
+#### 6.3.1 模型信息与调用入口
+
+| 项目 | 当前契约 |
+|---|---|
+| 算法标识 | `ppg_acc.active.offline.bp.v1` |
+| 模型名称与发布版本 | 从目标普通渠道模型目录读取，不在客户端拼接 |
+| 输入逻辑名 | `ppg`、`acc`，均为 CSV |
+| 固定参数 | `null`，不接受非空参数 |
+| 模型制品 | 发布版本绑定 `sbp`、`dbp`（joblib）及 `normalize`（CSV）；普通用户端不上传 |
+| 必需健康资料 | 无；可用的 `age_years`、`height_cm`、`weight_kg`、`gender` 使用提交时冻结快照 |
+| `isExample` | `false` |
+| 投影指标 | `sbp`、`dbp`：`number`，单位 `mmHg` |
+
+通过 `GET /api/v1/{channel}/models` 读取渠道当前已发布模型，再用返回的 `modelId` 创建任务。算法使用固定双传感器处理规则和版本制品，不接受客户端设置滤波、质量门槛或模型特征参数。
+
+#### 6.3.2 输入文件与资料快照
+
+PPG 使用 `logicalName=ppg`，通道组、单块布局和 `timestampFrame` 规则沿用第 6.1.2 节。ACC 使用 `logicalName=acc`，CSV 必须含 `timestampEvent,accX,accY,accZ`；时间戳及必需数值须为有限数值，两路时间轴都须严格递增。服务端分别按各自时间戳计算采样率；数据长度和采样率还须满足滤波处理条件。不会排序、插值、重采样、归零时钟或自动对齐两路时间轴。
+
+任务提交时冻结资料快照；缺少年龄、身高或体重时沿用旧算法的零值路径，`gender` 保留原值。提交后更新个人资料不会改变已提交任务。算法不要求额外客户端元数据。
+
+#### 6.3.3 成功结果与处理文件
+
+成功详情的 `data.result` 结构：
+
+```json
+{
+  "sbp": 120.25,
+  "dbp": 80.5,
+  "quality": {"score": 88.5, "threshold": 70},
+  "output_files": {
+    "processed_ppg": "<opaque file reference>",
+    "processed_scg": "<opaque file reference>"
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `sbp`、`dbp` | 双模型返回的有限原值，不限幅或舍入；与同名指标值一致，单位 `mmHg` |
+| `quality.score`、`quality.threshold` | 服务端实际 PPG 质量分数及固定门槛 70；客户端不重算 |
+| `output_files.processed_ppg` | 对象键 `processed_ppg` 是下载逻辑名；字段值是不透明文件引用，不传给下载接口 |
+| `output_files.processed_scg` | 对象键 `processed_scg` 是下载逻辑名；字段值是不透明文件引用，不传给下载接口 |
+
+`processed_ppg` 下载为 `timestamp,ppg` CSV；`processed_scg` 下载为 `timestamp,scgX,scgY,scgZ` CSV，其中 X/Y 为零，Z 为 AO 重建波形。时间戳为毫秒。前端只使用 `output_files` 的逻辑名对象键作为下载路径参数，不发送其字段值；文件引用不是 URL 或服务器路径。血压结果不代表医学准确性或诊断结论。
+
+#### 6.3.4 失败处理与发布滞后
+
+| `failureCode` | 前端处理 |
+|---|---|
+| `INFERENCE.INVALID_INPUT` | 展示安全 `failureMessage`；修正 PPG/ACC 列、数值、时间轴或采样条件后创建新任务 |
+| `INFERENCE.QUALITY_REJECTED` | 按 `qualityFailure.reason` 展示服务端的实际分数和门槛，重新采集后创建新任务 |
+| `INFERENCE.INVALID_ARTIFACT`、`INFERENCE.INVALID_PARAMETERS` | 固定版本制品或参数配置不可用，联系模型维护方 |
+| `INFERENCE.EXECUTION_TIMEOUT` | 服务端全局硬时限已到；任务失败且无部分结果，不自动重试原任务，恢复后创建新任务；通用行为见第 7.6 节 |
+| `INFERENCE.EXECUTION_ERROR`、`RESULT.INVALID_OUTPUT` | 不展示部分血压或输出；保留任务 ID 并联系后端，不把异常解释为质量通过 |
+
+质量拒绝和其他算法失败均为终态；错误详情只使用公开的 `failureCode`、安全 `failureMessage` 和受校验的 `qualityFailure`，不展示原始异常、文件路径或私有诊断。成功事务已登记结果但正式输出目录链接发布滞后时，任务仍是 `SUCCEEDED`；继续使用结果中 `output_files` 的逻辑名对象键调用标准下载接口，不访问正式目录或重跑推理。服务端按数据库登记的不可变存储键读取文件并幂等恢复发布。其他服务级失败码按第 7.6 节处理。
+
+### 6.4 PPG 主动离线糖尿病风险 v1（`ppg.active.offline.diabetes.v1`）
+
+#### 6.4.1 模型信息与调用入口
+
+| 项目 | 当前契约 |
+|---|---|
+| 算法标识 | `ppg.active.offline.diabetes.v1` |
+| 模型名称与发布版本 | 从目标普通渠道模型目录读取，不在客户端拼接 |
+| 输入逻辑名 | `ppg`，CSV |
+| 固定参数 | `null`，不接受非空参数 |
+| 模型制品 | 发布版本绑定 `diabetes`（ONNX）；普通用户端不上传 |
+| 必需健康资料 | 无 |
+| `isExample` | `false` |
+| 投影指标 | `diabetes_probability`：`number`，单位 `ratio`，值域 `[0,1]` |
+
+通过 `GET /api/v1/{channel}/models` 读取渠道当前已发布模型，再用返回的 `modelId` 创建任务。任务仍按普通草稿、上传、提交和状态查询流程执行；提交时固定模型版本，客户端不传算法参数或风险档位。
+
+#### 6.4.2 输入文件
+
+使用 `logicalName=ppg` 上传 UTF-8 CSV，至少包含严格递增的毫秒时间戳 `timestampFrame`，并且恰好包含一组完整通道：`avgR,avgG,avgB` 或 `avgY,avgU,avgV`。存在 `blockIndex` 时只接受单块 `0`。采样率须大于 `8 Hz`，有效样本数须达到采样率对应的 15 秒最短长度；30 Hz 至少 450 帧。服务端不选块、合并、插值、补齐或重采样。
+
+#### 6.4.3 成功结果与处理文件
+
+成功任务详情的 `data.result` 示例：
+
+```json
+{
+  "prob": 0.5523077249526978,
+  "risk_level": 0,
+  "quality": {"score": 88.65866718458382, "threshold": 70},
+  "output_files": {"processed_ppg": "<opaque file reference>"}
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `prob` | 模型类别 1 的原始概率，范围 `[0,1]`；不舍入，值与 `diabetes_probability` 指标完全一致，单位 `ratio` |
+| `risk_level` | 按 `Number(prob.toFixed(2))` 兼容规则生成的历史整数档位：`0`、`1`、`2`；不使用 ONNX `label` 生成 |
+| `quality.score`、`quality.threshold` | 服务端本次实际质量评分及固定门槛 `70`；客户端不重算 |
+| `output_files.processed_ppg` | 本次处理后 PPG 的不透明文件引用，不是 URL 或服务器路径 |
+
+分类先将概率按 JavaScript `toFixed(2)` 语义舍入，再按 `<0.66` 得 `0`、`<0.76` 得 `1`、否则得 `2`。这些整数是兼容旧客户端的编码；未经临床验证，不代表血糖浓度、确诊或医学风险分层。`processed_ppg` 下载内容为 `timestampFrame,ppg` CSV，时间戳为输入毫秒值，PPG 与输入帧逐行对应。下载路径使用逻辑名对象键 `processed_ppg`，不得把该键的字段值当作 URL 或下载路径。
+
+#### 6.4.4 算法失败处理
+
+| `failureCode` | 前端处理 |
+|---|---|
+| `INFERENCE.INVALID_INPUT` | 展示安全 `failureMessage`；检查通道、时间戳、块布局、最短长度和采样条件后创建新任务 |
+| `INFERENCE.QUALITY_REJECTED` | 按 `qualityFailure.reason` 展示服务端实际分数与门槛，提示重新采集并创建新任务 |
+| `INFERENCE.INVALID_ARTIFACT`、`INFERENCE.INVALID_PARAMETERS` | 固定版本模型制品或参数契约不可用，联系模型维护方 |
+| `INFERENCE.EXECUTION_TIMEOUT` | 服务端硬时限已到；任务失败且无成功载荷或输出，不自动重试原任务 |
+| `INFERENCE.EXECUTION_ERROR`、`RESULT.INVALID_OUTPUT` | 不展示部分概率、档位或输出；保留任务 ID 并联系后端，不把异常解释为质量通过 |
+
+质量拒绝和其他失败均为终态。不要展示原始异常、文件路径或私有诊断，也不要把概率或档位转换成血糖值。
+
 ## 7. 用户端推理任务与文件
 
 ### 7.1 接口顺序与状态
@@ -567,8 +682,9 @@ file=选中的文件二进制
 | `INFERENCE.OUTPUT_UNAVAILABLE`、`INFERENCE.STORAGE_UNAVAILABLE` | 推理文件存储不可用；联系后端 |
 | `RESULT.INVALID_OUTPUT` | 算法输出不符合结果契约；联系后端 |
 | `TASK.EXECUTION_ERROR`、`INFERENCE.EXECUTION_ERROR` | 安全的通用执行失败；保留任务 ID，联系后端 |
+| `INFERENCE.EXECUTION_TIMEOUT` | 推理超过服务端硬时限；显示安全失败文案“推理执行超时”，不要自动重试当前任务；保留任务 ID 并联系后端，重新发起时创建新任务。 |
 
-输入错误只通过 `failureCode=INFERENCE.INVALID_INPUT` 和固定 `failureMessage` 表达，不新增原因字段，也不返回内部 `failureDetail`；各正式 PPG 算法的文件要求和具体提示见第 6.1.2、6.1.4 节及第 6.2.2、6.2.4 节。
+输入错误只通过 `failureCode=INFERENCE.INVALID_INPUT` 和固定 `failureMessage` 表达，不新增原因字段，也不返回内部 `failureDetail`；各正式 PPG 算法的文件要求和具体提示见第 6.1.2、6.1.4 节及第 6.2.2、6.2.4 节，血压 v1 见第 6.3.2、6.3.4 节。
 
 质量拒绝使用 `INFERENCE.QUALITY_REJECTED`，详情只在白名单校验通过时提供 `qualityFailure`。结果契约错误使用 `RESULT.INVALID_OUTPUT` 和固定文案“推理结果格式无效”，不作为输入问题或质量拒绝呈现。以上失败任务均为 `data.status=FAILED` 且 `result=null`；只有质量拒绝可以有 `qualityFailure`。优先展示安全 `failureMessage`，未知失败码使用通用提示；算法专属处理见第 6 节对应算法小节。
 
@@ -578,7 +694,7 @@ file=选中的文件二进制
 
 输入下载使用上传返回的 `fileId`，可下载当前或历史输入。输出下载仅适用于 `SUCCEEDED`，从 `result.output_files` 取得逻辑名作为路径参数；该对象可能缺席。
 
-`output_files` 的值是服务端保存的不透明文件标识，不是公开 URL；不要展示、解析、拼接服务器路径或作为请求参数。前端只使用键构造输出下载接口，并对逻辑名做 URL 路径编码。HR/BR v1 和 SPO2 v1 的输出逻辑名分别见第 6.1.3、6.2.3 节；其他算法按各自版本契约处理。
+`output_files` 的值是服务端保存的不透明文件标识，不是公开 URL；不要展示、解析、拼接服务器路径或作为请求参数。前端只使用键构造输出下载接口，并对逻辑名做 URL 路径编码。HR/BR v1、SPO2 v1 和血压 v1 的输出逻辑名分别见第 6.1.3、6.2.3、6.3.3 节。成功事务后的正式链接发布可能滞后；服务端仍以数据库登记的实际键提供下载并幂等恢复，不要由前端访问目录或重新推理。
 
 下载仍需 `Authorization`，普通 `<a href>` 无法自行添加该请求头。浏览器建议使用带鉴权的 fetch 或 HTTP 客户端请求：先检查 HTTP 状态，失败时尝试读取 JSON 错误，成功后再转 Blob 并触发保存，使用后释放 Object URL。不要将令牌加进下载 URL。
 
@@ -610,7 +726,7 @@ file=选中的文件二进制
 
 ### 8.2 算法、参数和制品
 
-`algorithmKey` 指向后端代码显式注册的执行器，不能用任意字符串上传算法代码。正式 `ppg.active.offline.hr_br.v1` 要求单块 `ppg`、空参数、无制品和无健康资料，并声明 `hr`、`br` 指标；正式 `ppg.active.offline.spo2.v1` 要求单块 `ppg`、空参数、三个模型制品、无健康资料，并声明 `spo2` 指标。两者都由代码定义 `isExample=false`，计算结果均不构成医学准确性认证。未注册或已移除的标识不能创建、发布或执行；不提供无修订号别名。
+`algorithmKey` 指向后端代码显式注册的执行器，不能用任意字符串上传算法代码。正式 `ppg.active.offline.hr_br.v1` 要求单块 `ppg`、空参数、无制品和无健康资料，并声明 `hr`、`br` 指标；正式 `ppg.active.offline.spo2.v1` 要求单块 `ppg`、空参数、三个模型制品、无健康资料，并声明 `spo2` 指标；正式 `ppg_acc.active.offline.bp.v1` 要求 `ppg` 与 `acc`、空参数、`sbp`/`dbp`/`normalize` 三个版本制品，并声明 `sbp`、`dbp` 指标，不强制要求资料字段。三者均由代码定义 `isExample=false`，计算结果均不构成医学准确性认证。未注册或已移除的标识不能创建、发布或执行；不提供无修订号别名。
 
 创建版本请求：
 
@@ -628,7 +744,7 @@ PATCH 仅可修改未发布版本的算法标识和参数，不用于修改版�
 
 制品按算法要求的逻辑名上传，非空且受部署上传上限约束。同版本同逻辑名重复登记返回冲突，不能将任务输入的「同名重传自动选择」规则套用到模型制品。发布时制品逻辑名集合必须与算法声明完全一致，不能随意增加附件。
 
-正式 HR/BR v1 与 SPO2 v1 均不接受非空参数，也不要求健康资料；HR/BR v1 不需要制品，SPO2 v1 必须绑定 `spo2`、`feature_names`、`stable_features` 三个制品。发布时按算法契约设置完整制品集合；其他算法的参数和制品要求以其注册契约为准。当前没有算法注册表查询接口供前端动态生成管理表单。
+正式 HR/BR v1 与 SPO2 v1 均不接受非空参数，也不要求健康资料；HR/BR v1 不需要制品，SPO2 v1 必须绑定 `spo2`、`feature_names`、`stable_features` 三个制品；血压 v1 必须绑定 `sbp`、`dbp`（joblib）和 `normalize`（CSV），缺少必要资料不阻止执行，资料映射沿用冻结快照及旧版缺失解释。发布时按算法契约设置完整制品集合；其他算法的参数和制品要求以其注册契约为准。当前没有算法注册表查询接口供前端动态生成管理表单。
 
 ### 8.3 指标配置
 
@@ -646,6 +762,13 @@ SPO2 v1 声明一个指标：
 | `code` | `valueType` | `unit` | 含义 |
 |---|---|---|---|
 | `spo2` | `number` | `percent` | 血氧百分数 |
+
+血压 v1 声明两个指标：
+
+| `code` | `valueType` | `unit` | 含义 |
+|---|---|---|---|
+| `sbp` | `number` | `mmHg` | 收缩压 |
+| `dbp` | `number` | `mmHg` | 舒张压 |
 
 创建全局指标时，分别为目标算法创建所需指标；若指标代码已存在，先确认其类型和单位一致，不要把冲突响应当作创建成功。
 

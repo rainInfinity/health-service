@@ -84,6 +84,7 @@ curl --include "$API/$CHANNEL/tasks/$TASK_ID" \
 | 输入错误 | `INFERENCE.INVALID_INPUT` | 按受控原因显示固定文案，例如多块输入为“当前算法版本仅支持单块 PPG”，非递增时间戳为“PPG 时间戳必须为有限且严格递增的毫秒数值”，样本不足为“PPG 数据不足以执行本算法所需处理”；`qualityFailure` 为 `null`。 |
 | 质量拒绝 | `INFERENCE.QUALITY_REJECTED` | 显示质量拒绝摘要；合法拒绝另通过 `qualityFailure.reason` 区分，`LOW_SCORE` 保留实际评分与阈值。 |
 | 结果无效 | `RESULT.INVALID_OUTPUT` | 显示“推理结果格式无效”；不伪装成输入错误或质量拒绝，`qualityFailure` 为 `null`。 |
+| 硬执行超时 | `INFERENCE.EXECUTION_TIMEOUT` | 显示固定安全文案“推理执行超时”；任务为失败终态，服务端不自动重试，只有失败状态提交后才确认消费者消息。 |
 
 旧版通用输入异常和无法识别的原因继续使用“推理输入无效”。客户端按稳定失败码及合法 `qualityFailure.reason` 分支，不解析本地化文案，也不要求服务器返回异常正文或路径。
 

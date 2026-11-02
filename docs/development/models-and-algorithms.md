@@ -9,7 +9,7 @@
 | 传感器集合 | 算法使用的传感器或信号类型；多个类型按约定顺序连接。 | `ppg`、`rppg`、`ppg_acc` |
 | 采集模式 | 测量数据的采集方式。 | `active`、`passive` |
 | 处理模式 | 对数据执行推理的方式。 | `offline`、`realtime` |
-| 输出 | 算法输出的业务指标类别。 | `hr`、`hr_br`、`spo2`、`bp` |
+| 输出 | 算法输出的业务指标类别。 | `hr`、`hr_br`、`spo2`、`bp`、`diabetes` |
 | 实现修订号 | 固定一份可执行实现及其规则，区别于模型发布版本号。 | `v1`、`v2` |
 
 示例：
@@ -19,6 +19,7 @@
 - `rppg.passive.offline.hr.v1`：被动采集 rPPG，离线输出心率的第一个实现修订。
 - `rppg.active.realtime.hr.v1`：主动采集 rPPG，实时输出心率的第一个实现修订。
 - `ppg_acc.active.offline.bp.v1`：主动采集 PPG 和加速度信号，离线输出血压相关结果的第一个实现修订。
+- `ppg.active.offline.diabetes.v1`：主动采集 PPG，离线输出旧版模型概率及风险档位的第一个实现修订。
 
 `ppg_acc` 表示 PPG 与加速度传感器组合；若算法从原始加速度推导 SCG，`requiredInputs` 应声明实际上传的加速度文件，而不是把它称为 SCG 文件。算法标识描述算法契约，不替代 `requiredInputs`、结果字段或单位声明。`active`／`passive` 表示采集模式；`offline`／`realtime` 表示处理模式。示例只规定命名，不表示相应执行器已经实现或注册。实时标识只有在执行运行时支持实时输入和结果返回时才能用于可执行版本；当前文件上传任务流程是离线处理。
 
@@ -81,7 +82,11 @@
 
 正式 `ppg.active.offline.hr_br.v1` 已注册，可用空参数、零制品和零健康资料发布；输入逻辑名为 `ppg`，投影指标使用 `hr`／`br` 及其固定单位。实现规则见[PPG 主动离线 HR/BR v1](algorithms/ppg-active-offline-hr-br-v1.md)。
 
-正式 `ppg.active.offline.spo2.v1` 也已注册，要求 `ppg` 输入、空参数及 `spo2`、`feature_names`、`stable_features` 三个模型制品，投影指标为 `spo2`／`percent`，不要求健康资料。实现规则见[PPG 主动离线血氧 v1](algorithms/ppg-active-offline-spo2-v1.md)。两个算法均由代码定义 `isExample=false`，不提供无修订号别名。
+正式 `ppg.active.offline.spo2.v1` 也已注册，要求 `ppg` 输入、空参数及 `spo2`、`feature_names`、`stable_features` 三个模型制品，投影指标为 `spo2`／`percent`，不要求健康资料。实现规则见[PPG 主动离线血氧 v1](algorithms/ppg-active-offline-spo2-v1.md)。HR/BR 与血氧算法均由代码定义 `isExample=false`，不提供无修订号别名。
+
+正式 `ppg_acc.active.offline.bp.v1` 也已注册，使用 `ppg`、`acc` 两个 CSV 输入，不要求健康资料且只接受空参数。版本必须绑定 `sbp`、`dbp` 两个 joblib 模型和 `normalize` CSV；投影指标为 `sbp`／`dbp`、类型 `number`、单位 `mmHg`。该算法由代码定义 `isExample=false`，不提供无修订号别名。实现规则见[PPG+ACC 离线血压 v1](algorithms/ppg-acc-active-offline-bp-v1.md)。
+
+正式 `ppg.active.offline.diabetes.v1` 也已注册，仅要求 `ppg` CSV，不要求健康资料且只接受空参数；每个版本必须绑定单个 `diabetes` ONNX 制品。投影指标为 `diabetes_probability`，类型 `number`、单位 `ratio`；结果还包含未经舍入的 `prob`、按旧 JavaScript 舍入边界生成的 `risk_level` 和实际质量信息。实现及迁移基线见[PPG 主动离线糖尿病风险 v1](algorithms/ppg-active-offline-diabetes-v1.md)。
 
 ### 算法报告质量拒绝
 
@@ -159,7 +164,7 @@ curl --include --request PUT "$API/manager/model-versions/$VERSION_ID/metrics" \
   --data '{"metricCodes":["hr","br"]}'
 ```
 
-发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且物理文件存在，以及所有已选指标的代码、值类型和单位。HR/BR v1 不需要模型制品；SPO2 v1 必须上传 `spo2`、`feature_names` 和 `stable_features`；其他算法按各自注册契约处理。发布成功后算法、参数、制品和指标集合不可原地修改；重复发布返回原发布时间。
+发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且物理文件存在，以及所有已选指标的代码、值类型和单位。HR/BR v1 不需要模型制品；SPO2 v1 必须上传 `spo2`、`feature_names` 和 `stable_features`；血压 v1 必须上传 `sbp`、`dbp` 和 `normalize`；糖尿病 v1 必须上传 `diabetes` ONNX；其他算法按各自注册契约处理。发布成功后算法、参数、制品和指标集合不可原地修改；重复发布返回原发布时间。
 
 算法通过 `input_extensions` 与 `artifact_extensions` 为每个逻辑名声明允许的后缀集合；映射键必须分别与 `required_inputs`、`required_artifacts` 完全一致。后缀使用不带点号的小写扩展名，并在注册时校验。当前正式契约如下：
 
@@ -167,11 +172,13 @@ curl --include --request PUT "$API/manager/model-versions/$VERSION_ID/metrics" \
 |---|---|---|
 |`ppg.active.offline.hr_br.v1`|`ppg: csv`|无|
 |`ppg.active.offline.spo2.v1`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`|
+|`ppg_acc.active.offline.bp.v1`|`ppg: csv`、`acc: csv`|`sbp: joblib`、`dbp: joblib`、`normalize: csv`|
+|`ppg.active.offline.diabetes.v1`|`ppg: csv`|`diabetes: onnx`|
 
-上传端只从客户端文件名提取最后一个后缀并转为小写进行白名单校验；客户端路径、完整文件名和 MIME 不决定存储键。扩展名不证明文件内容有效，CSV 仍由算法解析，ONNX 与 JSON 仍由版本资源加载器校验。
+上传端只从客户端文件名提取最后一个后缀并转为小写进行白名单校验；客户端路径、完整文件名和 MIME 不决定存储键。扩展名不证明文件内容有效，CSV 仍由算法解析，ONNX 与 JSON 由版本资源加载器校验；血压版本的 joblib 仅限受信发布，具体信任边界见算法说明。
 
 
-仅当执行器声明了制品时才上传；`logicalName` 必须与算法契约中的名称完全一致。文件名只用于提取并校验格式后缀，不用于构造存储路径。血氧模型及清单分别使用 `.onnx` 和 `.json`：
+仅当执行器声明了制品时才上传；`logicalName` 必须与算法契约中的名称完全一致。文件名只用于提取并校验格式后缀，不用于构造存储路径。血氧模型及清单分别使用 `.onnx` 和 `.json`，糖尿病 v1 使用 `logicalName=diabetes` 和 `.onnx`：
 
 ```sh
 curl --include --request POST "$API/manager/model-versions/$VERSION_ID/artifacts" \
@@ -180,6 +187,12 @@ curl --include --request POST "$API/manager/model-versions/$VERSION_ID/artifacts
   --form 'file=@./spo2.onnx'
 ```
 
+```sh
+curl --include --request POST "$API/manager/model-versions/$VERSION_ID/artifacts" \
+  --header "Authorization: Bearer $MANAGER_ACCESS" \
+  --form 'logicalName=diabetes' \
+  --form 'file=@./diabetes.onnx'
+```
 
 ```sh
 curl --include --request POST "$API/manager/model-versions/$VERSION_ID/publish" \

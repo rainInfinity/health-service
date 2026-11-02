@@ -97,6 +97,7 @@ Django 从项目根目录读取可选的 `.env`，不受启动时工作目录影
 | `INFERENCE_GROUP` | `health-inference` | 消费组名称，不能为空。 |
 | `INFERENCE_LEASE_SECONDS` | `60` | 执行租约时长，正整数秒。 |
 | `INFERENCE_HEARTBEAT_SECONDS` | `10` | 心跳间隔，必须小于租约时长的三分之一。 |
+| `INFERENCE_EXECUTION_TIMEOUT_SECONDS` | `300` | 所有算法共享的硬执行上限，正整数秒；独立于租约和心跳。 |
 | `INFERENCE_DISPATCH_INTERVAL_SECONDS` | `30` | 数据库补发间隔，正整数秒。 |
 | `INFERENCE_MAX_ATTEMPTS` | `3` | 有效执行领取次数上限，正整数。 |
 | `INFERENCE_POLL_MILLISECONDS` | `1000` | 消费轮询等待上限，正整数毫秒。 |
@@ -237,6 +238,8 @@ LOG_DIR=logs/inference uv run --locked --package health-service python manage.py
 ```
 
 每轮先执行最多 100 条的数据库补发扫描，再用 `XAUTOCLAIM` 重领未确认消息，剩余名额用于领取新消息；`--once` 不等待后续消息，空队列时也会退出。常驻消费者无消息时最多等待 `INFERENCE_POLL_MILLISECONDS`。成功或失败终态持久化后才确认消息；成功任务的终态消息在确认前会尝试恢复正式结果链接，失败终态不发布输出。畸形、缺失或已终态任务消息会安全确认。SIGINT／SIGTERM 停止继续处理后续消息，当前执行会先按租约和令牌规则完成；未确认消息在租约到期后可由其他消费者重领。不要用强制终止代替正常停止；进程被强制结束时依赖数据库租约到期与 Redis 重领恢复。
+
+每次算法执行由共享串行子进程承载，`INFERENCE_EXECUTION_TIMEOUT_SECONDS` 是所有算法共用的硬上限，与租约和心跳独立。超时会强制终止子进程并按当前执行令牌提交安全失败码 `INFERENCE.EXECUTION_TIMEOUT`（“推理执行超时”）；只有失败终态提交后才确认消息，任务不会自动重试。正常任务复用子进程运行时缓存，超时后后续任务使用新进程。
 
 算法只在明确质量拒绝时以 `INFERENCE.QUALITY_REJECTED` 进入 `FAILED` 终态；消费者在失败信息提交后才确认消息。`LOW_SCORE` 私有明细保存本次实际分数和阈值，`NO_VALID_SIGNAL` 不保存评分。已拒绝任务不会由补发扫描或消息重放重新执行；重新采集应创建携带新输入的新任务。既有恢复仍仅覆盖可派发的 `SUBMITTED` 和租约已过期的 `RUNNING`，不改变失败终态。事件日志只记录实际错误码，不记录质量原因、评分、阈值或异常正文。这条反馈通道不代表已新增质检规则，也不验证医学准确性。
 
