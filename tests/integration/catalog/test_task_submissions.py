@@ -5,12 +5,19 @@ from datetime import date
 from decimal import Decimal
 from threading import Barrier
 
+import numpy as np
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import close_old_connections, connections
 from django.test import override_settings
 from django.utils import timezone
+from health_inference.algorithms.ppg_acc_active_offline_bp_v1.features import (
+    build_feature_vector,
+)
+from health_inference.algorithms.ppg_acc_active_offline_bp_v1.load_input import (
+    BPProfileSnapshot,
+)
 from health_service.application.catalog import (
     create_model,
     create_model_version,
@@ -20,6 +27,7 @@ from health_service.application.catalog import (
 from health_service.application.profiles import update_profile
 from health_service.application.task_exceptions import TaskConflict, TaskInputInvalid
 from health_service.application.tasks import (
+    _profile_snapshot,
     create_task_draft,
     submit_user_task,
     upload_task_input,
@@ -80,7 +88,7 @@ def _close_worker_database_connection() -> None:
 
 @pytest.mark.django_db
 def test_submission_rechecks_files_and_freezes_complete_profile(tmp_path):
-    """提交重检实际输入并冻结单位、未知病史与提交日年龄。"""
+    """提交并冻结资料快照，验证后续资料更新不改变血压模型特征。"""
     user, _model, _version, task = _create_draft(username="submit-profile-owner")
     with override_settings(
         TASK_DATA_ROOT=tmp_path / "tasks",
@@ -108,6 +116,22 @@ def test_submission_rechecks_files_and_freezes_complete_profile(tmp_path):
 
     record = Task.objects.get(pk=task.task_id)
     snapshot = record.profile_snapshot
+
+    normalization = {
+        name: {"miu": 1.0, "segma": 1.0}
+        for name in ("X1", "age", "pr", "bmi", "height")
+    }
+
+    def snapshot_features(profile_snapshot):
+        """将提交快照映射为实际血压算法六维特征。"""
+        profile = BPProfileSnapshot(
+            age_years=profile_snapshot["age_years"],
+            height_cm=profile_snapshot["height_cm"],
+            weight_kg=profile_snapshot["weight_kg"],
+            gender=profile_snapshot["gender"],
+        )
+        return build_feature_vector(profile, 68.038462, 79, normalization)
+
     assert submitted.status == Task.StatusChoices.SUBMITTED
     assert record.submitted_at is not None
     local_submission_date = timezone.localdate(record.submitted_at)
@@ -126,17 +150,34 @@ def test_submission_rechecks_files_and_freezes_complete_profile(tmp_path):
     assert "is_hypertensive" not in snapshot["history_json"]
     assert Profile.objects.filter(user_id=user.pk).exists()
     assert TaskInputFile.objects.get(pk=uploaded.file_id).is_selected is True
+    submitted_features = snapshot_features(snapshot)
 
     update_profile(
         user.pk,
         {
             "name": "后续修改",
+            "gender": 1,
             "birth_date": date(2000, 1, 1),
+            "height_cm": Decimal("190.00"),
+            "weight_kg": Decimal("90.00"),
             "history_json": {"is_diabetic": True, "is_hypertensive": True},
         },
     )
     record.refresh_from_db()
     assert record.profile_snapshot == snapshot
+    current_profile = Profile.objects.get(user_id=user.pk)
+    assert current_profile.gender == 1
+    assert current_profile.birth_date == date(2000, 1, 1)
+    assert current_profile.height_cm == Decimal("190.00")
+    assert current_profile.weight_kg == Decimal("90.00")
+    current_snapshot = _profile_snapshot(
+        current_profile,
+        submitted_at=record.submitted_at,
+    )
+    current_features = snapshot_features(current_snapshot)
+    frozen_features = snapshot_features(record.profile_snapshot)
+    np.testing.assert_array_equal(submitted_features, frozen_features)
+    assert not np.array_equal(submitted_features, current_features)
 
 
 @pytest.mark.django_db

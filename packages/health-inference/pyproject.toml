@@ -16,6 +16,9 @@ ppg = [
     "onnxruntime==1.23.2",
     "scikit-learn==1.9.1",
     "scipy==1.16.3",
+    "joblib>=1.5.3,<2",
+    "pygam==0.12.0",
+    "vmdpy==0.2",
 ]
 
 [build-system]

@@ -2,7 +2,9 @@
 
 from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
+import joblib
 import pytest
 from django.test import override_settings
 from health_inference import register_algorithm
@@ -25,6 +27,10 @@ from health_service.application.catalog import (
 from health_service.application.catalog_exceptions import (
     CatalogConfigurationInvalid,
     CatalogConflict,
+)
+from health_service.infrastructure.inference_adapter import (
+    _version_runtime,
+    clear_version_runtime_cache,
 )
 from health_service.infrastructure.persistence.catalog import (
     get_model_version,
@@ -64,6 +70,7 @@ def _add_test_catalog_metric(version_id: int) -> None:
         version_id=version_id,
         metric_codes=(_PUBLISHABLE_TEST_METRIC,),
     )
+
 
 def _validate_test_parameters(params):
     """测试算法不接受任何发布参数。"""
@@ -167,7 +174,6 @@ def test_artifact_upload_is_version_scoped_and_removes_duplicate_orphan(tmp_path
         assert stored_path.name.startswith("weights-")
         assert other_path.name.startswith("weights-")
 
-
         with pytest.raises(CatalogConflict):
             upload_model_artifact(
                 version_id=version.version_id,
@@ -255,9 +261,7 @@ def test_mismatched_metric_contract_is_rejected(value_type, unit):
             version_id=version.version_id,
             metric_codes=(mismatched.code,),
         )
-    assert not ModelVersionMetric.objects.filter(
-        model_version_id=version.version_id
-    ).exists()
+    assert not ModelVersionMetric.objects.filter(model_version_id=version.version_id).exists()
 
 
 @pytest.mark.django_db
@@ -357,6 +361,8 @@ def test_publish_requires_exact_artifact_inventory_and_existing_file(tmp_path, m
         stored_path.unlink()
         with pytest.raises(CatalogConfigurationInvalid):
             publish_model_version(version_id=version.version_id)
+
+
 def _create_ppg_v1_version(*, params: dict | None = None):
     """创建正式 HR/BR v1 的未发布版本。"""
     model = create_model(code="pulse-v1", name="Pulse v1", description=None)
@@ -416,3 +422,134 @@ def test_official_ppg_v1_rejects_nonempty_parameters():
 
     persisted = get_model_version(version_id=version.version_id)
     assert persisted is not None and persisted.published_at is None
+
+
+class _BPTestModel:
+    """提供用于版本制品装配验收的确定性单值模型。"""
+
+    def __init__(self, value: float):
+        """保存该制品的固定预测值。"""
+        self.value = float(value)  # 单个合成模型预测值。
+
+    def predict(self, features):
+        """为每个六维输入返回一个有限预测值。"""
+        return [self.value] * len(features)
+
+
+def _write_bp_model(path: Path, value: float) -> bytes:
+    """序列化合成血压模型并返回上传内容。"""
+    joblib.dump(_BPTestModel(value), path)
+    return path.read_bytes()
+
+
+def _create_bp_v1_version(*, params: dict | None = None):
+    """创建正式血压 v1 的未发布模型版本。"""
+    model = create_model(
+        code=f"bp-{uuid4().hex}",
+        name="Blood pressure v1",
+        description=None,
+    )
+    return create_model_version(
+        model_id=model.model_id,
+        version="1.0.0",
+        algorithm_key="ppg_acc.active.offline.bp.v1",
+        params=params,
+    )
+
+
+def _upload_bp_v1_artifacts(version_id: int, source_root: Path) -> None:
+    """上传真实可加载的双模型与归一化 CSV 合成制品。"""
+    source_root.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        "sbp": ("sbp.joblib", _write_bp_model(source_root / "sbp.joblib", 120.0)),
+        "dbp": ("dbp.joblib", _write_bp_model(source_root / "dbp.joblib", 80.0)),
+        "normalize": (
+            "normalize.csv",
+            b""",X1,age,pr,bmi,height
+miu,0,0,0,0,0
+segma,1,1,1,1,1
+""",
+        ),
+    }
+    for logical_name, (filename, content) in artifacts.items():
+        upload_model_artifact(
+            version_id=version_id,
+            logical_name=logical_name,
+            source_filename=filename,
+            source=BytesIO(content),
+        )
+
+
+def _add_bp_v1_metrics(version_id: int) -> None:
+    """为血压 v1 选择 number/mmHg 双指标投影。"""
+    for code, description in (("sbp", "收缩压"), ("dbp", "舒张压")):
+        create_metric_definition(
+            code=code,
+            description=description,
+            value_type="number",
+            unit="mmHg",
+        )
+    set_model_version_metrics(version_id=version_id, metric_codes=("sbp", "dbp"))
+
+
+@pytest.mark.django_db
+def test_official_bp_v1_publishes_and_creates_runtime_from_registered_artifacts(
+    tmp_path: Path,
+):
+    """真实发布流程按登记路径加载三件套并创建固定版本运行时。"""
+    clear_version_runtime_cache()
+    try:
+        with override_settings(
+            TASK_DATA_ROOT=tmp_path / "tasks",
+            MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+        ):
+            draft = _create_bp_v1_version()
+            _upload_bp_v1_artifacts(draft.version_id, tmp_path / "source")
+            _add_bp_v1_metrics(draft.version_id)
+
+            published = publish_model_version(version_id=draft.version_id)
+            runtime = _version_runtime(published.version_id).algorithm_runtime
+
+            assert published.published_at is not None
+            assert runtime.definition.key == "ppg_acc.active.offline.bp.v1"
+            assert runtime.definition.is_example is False
+            assert runtime.resources.params == {}
+            assert set(runtime.resources.artifact_paths) == {
+                "sbp",
+                "dbp",
+                "normalize",
+            }
+            assert all(path.is_file() for path in runtime.resources.artifact_paths.values())
+            assert tuple(
+                (metric.code, metric.value_type, metric.unit)
+                for metric in runtime.definition.metric_contracts
+            ) == (
+                ("sbp", "number", "mmHg"),
+                ("dbp", "number", "mmHg"),
+            )
+    finally:
+        clear_version_runtime_cache()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("invalid_case", ("missing_artifacts", "nonempty_parameters"))
+def test_official_bp_v1_rejects_incomplete_publish_configuration(
+    tmp_path: Path,
+    invalid_case: str,
+):
+    """血压版本缺制品或包含非空参数时不得发布。"""
+    with override_settings(
+        TASK_DATA_ROOT=tmp_path / "tasks",
+        MODEL_ARTIFACT_ROOT=tmp_path / "artifacts",
+    ):
+        params = {"quality_threshold": 70} if invalid_case == "nonempty_parameters" else None
+        draft = _create_bp_v1_version(params=params)
+        if invalid_case == "nonempty_parameters":
+            _upload_bp_v1_artifacts(draft.version_id, tmp_path / "source")
+        _add_bp_v1_metrics(draft.version_id)
+
+        with pytest.raises(CatalogConfigurationInvalid):
+            publish_model_version(version_id=draft.version_id)
+
+        persisted = get_model_version(version_id=draft.version_id)
+        assert persisted is not None and persisted.published_at is None

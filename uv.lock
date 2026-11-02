@@ -358,21 +358,27 @@ dependencies = [
 [package.optional-dependencies]
 ppg = [
     { name = "dotmap" },
+    { name = "joblib" },
     { name = "neurokit2" },
     { name = "onnxruntime" },
+    { name = "pygam" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "vmdpy" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "dotmap", marker = "extra == 'ppg'", specifier = "==1.3.30" },
+    { name = "joblib", marker = "extra == 'ppg'", specifier = ">=1.5.3,<2" },
     { name = "neurokit2", marker = "extra == 'ppg'", specifier = "==0.2.12" },
     { name = "numpy", specifier = "==2.3.5" },
     { name = "onnxruntime", marker = "extra == 'ppg'", specifier = "==1.23.2" },
     { name = "pandas", specifier = "==2.3.3" },
+    { name = "pygam", marker = "extra == 'ppg'", specifier = "==0.12.0" },
     { name = "scikit-learn", marker = "extra == 'ppg'", specifier = "==1.9.1" },
     { name = "scipy", marker = "extra == 'ppg'", specifier = "==1.16.3" },
+    { name = "vmdpy", marker = "extra == 'ppg'", specifier = "==0.2" },
 ]
 provides-extras = ["ppg"]
 
@@ -703,6 +709,18 @@ wheels = [
 ]
 
 [[package]]
+name = "progressbar2"
+version = "4.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/1e/5bd376abe32a392e74fffd82feb42ee1472d263bd358d628af20663d0346/progressbar2-4.6.0.tar.gz", hash = "sha256:fe48c8955a84428af77bff2642ba47041e1b8f7c867a5b7cc94f8bc255a8f0cf", size = 542464, upload-time = "2026-08-14T01:07:30.008Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/4c/ba64c450164fa4feaa9c4bb1c6445811d89d6a1995bfc58d039273b698af/progressbar2-4.6.0-py3-none-any.whl", hash = "sha256:2d78bdeb1debef92a39dd9042e0689542bd72d6e2f30b13432db371aa9d8ee4e", size = 104185, upload-time = "2026-08-14T01:07:28.474Z" },
+]
+
+[[package]]
 name = "protobuf"
 version = "7.36.2"
 source = { registry = "https://pypi.org/simple" }
@@ -817,6 +835,20 @@ wheels = [
 ]
 
 [[package]]
+name = "pygam"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "progressbar2" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/95/f5866f7f8fa2a5a7f55b4711cd23fa592e03e2988f3ea769e4cf884b1a46/pygam-0.12.0.tar.gz", hash = "sha256:7c098dfbfbb7a6b9fa4e1a579380e3b0b866fe8fa56f9d852ffdeaecfe56d5ea", size = 82376, upload-time = "2025-12-18T21:46:13.643Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/2d/cb0cd5865a8dac8869cdd01df17c2c0c94d9aa22b167e1bbfa01559dd3a9/pygam-0.12.0-py3-none-any.whl", hash = "sha256:e66597040fc9b6f113a5a9229fc42fb4ea60e8f55942a3b438caccf0512835f4", size = 84618, upload-time = "2025-12-18T21:46:11.759Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.21.0"
 source = { registry = "https://pypi.org/simple" }
@@ -905,6 +937,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/74/26/2fbeedb218a787a5eea551c7532cac4e009f83d689dd2faa0d0353473f86/python_dotenv-1.2.4.tar.gz", hash = "sha256:f0d53e69935a851c0dcc78f3ab7aaccd8cabef0b92382b576b824212902873c0", size = 60824, upload-time = "2026-10-01T05:36:10Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/d1/38f3a3405989a89ac18390803e70c6ad7c7760da4f9b83cbeca0c44a0c72/python_dotenv-1.2.4-py3-none-any.whl", hash = "sha256:42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc", size = 23266, upload-time = "2026-10-01T05:36:08.633Z" },
+]
+
+[[package]]
+name = "python-utils"
+version = "4.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c9/e7/064880019d2f205b837e5c463eb472b36e220d380e5733e49911975f7072/python_utils-4.1.4.tar.gz", hash = "sha256:a8c01f8c0b5a113fa1ab663308bb8a4773afec3cc8f9e6baeb756ac97377f8ce", size = 80130, upload-time = "2026-10-21T01:07:07.458Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/97/4dfe369f4e1eed1f50e7cbfaf5ef5e1fa025e8fa29073290d77d7aea89b1/python_utils-4.1.4-py3-none-any.whl", hash = "sha256:009251f6182f872cd4a74225cdf3636f48ee4596532082bd367797c5924d92bf", size = 49838, upload-time = "2026-10-21T01:07:05.761Z" },
 ]
 
 [[package]]
@@ -1126,4 +1170,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
+]
+
+[[package]]
+name = "vmdpy"
+version = "0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/96/23fdc1b42a835e3c64bae636bd1b2249680c4c70bbb416f09e8a29a1d8d8/vmdpy-0.2-py2.py3-none-any.whl", hash = "sha256:331e3013dbc95beb564fe7ce70a0f95a09efb44d0ec56a28f61e9ab40fe16c1b", size = 6547, upload-time = "2020-08-11T22:08:45.708Z" },
 ]
