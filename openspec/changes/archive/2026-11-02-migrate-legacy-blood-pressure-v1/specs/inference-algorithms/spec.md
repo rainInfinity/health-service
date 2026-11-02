@@ -14,7 +14,7 @@
 - **THEN** 算法报告 `INFERENCE.INVALID_INPUT` 及明确受控原因，不生成默认血压或质量结论
 
 ### Requirement: 血压 v1 固定双模型与归一化制品
-血压 v1 MUST 绑定 `sbp`、`dbp`、`normalize` 三个固定版本制品，后缀分别为 joblib、joblib、csv，拒绝非空参数。两个模型 MUST 各接受六维特征，归一化参数 MUST 提供 X1、age、pr、bmi、height 的有限均值与有限非零标准差。不兼容资源 MUST 按制品错误失败，不扫描 latest 或使用默认权重。可执行对象制品 MUST 限于已核验来源的受信发布，不将后缀检查宣称为安全反序列化。
+血压 v1 MUST 绑定 `sbp`、`dbp`、`normalize` 三个固定版本制品，后缀分别为 joblib、joblib、csv，拒绝非空参数。两个模型 MUST 各接受六维特征，归一化参数 MUST 提供 X1、age、pr、bmi、height 的有限均值与有限非零标准差。不兼容资源 MUST 按制品错误失败，不扫描 latest 或使用默认权重。可执行对象制品 MUST 通过受信发布流程提供；系统 MUST NOT 将后缀检查宣称为安全反序列化。
 
 #### Scenario: 缺失或不兼容制品
 - **WHEN** 版本缺少任一制品，归一化参数缺列、标准差为零，或模型不支持六维特征
