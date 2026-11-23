@@ -67,6 +67,9 @@ _TASK_DETAIL_FIELDS = (
     "failure_code",
     "failure_message",
     "failure_detail",
+    "capture_method",
+    "capture_mode",
+    "duration_ms",
 )
 
 
@@ -262,8 +265,11 @@ def mark_task_submitted(
     submitted_at: datetime,
     client_metadata: dict[str, object] | None,
     user_id: int,
+    capture_method: str | None = None,
+    capture_mode: str | None = None,
+    duration_ms: int | None = None,
 ) -> TaskRecordData:
-    """原子冻结草稿资料并转换为已提交状态。"""
+    """在同一次状态更新中冻结资料、采集属性、元数据和提交时间。"""
     updated = Task.objects.filter(
         pk=task_id,
         status=Task.StatusChoices.DRAFT,
@@ -272,6 +278,9 @@ def mark_task_submitted(
         profile_snapshot=profile_snapshot,
         submitted_at=submitted_at,
         client_metadata=client_metadata,
+        capture_method=capture_method,
+        capture_mode=capture_mode,
+        duration_ms=duration_ms,
         updated_at=submitted_at,
         updated_by=f"user:{user_id}",
     )
@@ -637,4 +646,7 @@ def _task_record_data(
         failure_code=task.failure_code if include_detail else None,
         failure_message=task.failure_message if include_detail else None,
         failure_detail=task.failure_detail if include_detail else None,
+        capture_method=task.capture_method if include_detail else None,
+        capture_mode=task.capture_mode if include_detail else None,
+        duration_ms=task.duration_ms if include_detail else None,
     )

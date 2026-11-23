@@ -1,3 +1,5 @@
+"""定义任务、输入文件和可选指标投影的持久化约束。"""
+
 from typing import ClassVar
 
 from django.db import models
@@ -6,6 +8,8 @@ from .base import AuditModel
 
 
 class Task(AuditModel):
+    """保存任务固定归属、提交快照和权威执行状态。"""
+
     class StatusChoices(models.TextChoices):
         DRAFT = "DRAFT", "草稿"
         SUBMITTED = "SUBMITTED", "已提交"
@@ -47,6 +51,23 @@ class Task(AuditModel):
         null=True,
         blank=True,
         db_comment="任务提交时记录的可选客户端元数据",
+    )
+    capture_method = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        db_comment="提交时冻结的采集方式；缺失保持未知",
+    )
+    capture_mode = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        db_comment="提交时冻结的采集来源；当前仅 active",
+    )
+    duration_ms = models.BigIntegerField(
+        null=True,
+        blank=True,
+        db_comment="实际采集时长，单位毫秒；缺失保持未知",
     )
     started_at = models.DateTimeField(null=True, blank=True, db_comment="开始执行时间")
     finished_at = models.DateTimeField(null=True, blank=True, db_comment="结束时间")
@@ -159,6 +180,35 @@ class Task(AuditModel):
                 condition=models.Q(attempt_count__gte=0),
                 name="health_task_attempt_count_nonnegative",
             ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        capture_method__isnull=True,
+                        capture_mode__isnull=True,
+                        duration_ms__isnull=True,
+                    )
+                    | models.Q(
+                        capture_method__isnull=False,
+                        capture_mode__isnull=False,
+                        duration_ms__isnull=False,
+                        capture_method__in=["fingertip", "fingertip_chest"],
+                        capture_mode="active",
+                        duration_ms__gt=0,
+                    )
+                ),
+                name="health_task_measurement_valid",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="DRAFT")
+                    | models.Q(
+                        capture_method__isnull=True,
+                        capture_mode__isnull=True,
+                        duration_ms__isnull=True,
+                    )
+                ),
+                name="health_task_draft_measurement_null",
+            ),
         ]
         indexes: ClassVar[list[models.Index]] = [
             models.Index(
@@ -173,9 +223,14 @@ class Task(AuditModel):
                 fields=["model_version", "status"],
                 name="htask_version_status_idx",
             ),
+            models.Index(
+                fields=["user", "channel", "-submitted_at", "-id"],
+                name="htask_user_chan_submit_idx",
+            ),
         ]
 
     def __str__(self):
+        """返回任务主键及当前状态。"""
         return f"{self.pk}:{self.status}"
 
 

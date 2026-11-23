@@ -40,6 +40,7 @@ from health_service.schemas.internal.profiles import ProfileData
 from health_service.schemas.internal.tasks import (
     TaskDetailData,
     TaskInputFileData,
+    TaskMeasurementData,
     TaskRecordData,
     TaskSummaryData,
 )
@@ -139,8 +140,9 @@ def submit_user_task(
     user_id: int,
     channel: str,
     client_metadata: dict[str, object] | None = None,
+    measurement: TaskMeasurementData | None = None,
 ) -> TaskSummaryData:
-    """校验当前版本与选中文件后冻结资料并提交本人草稿。"""
+    """校验版本与输入后在原事务冻结资料、采集属性和元数据。"""
     if channel not in ORDINARY_CHANNELS:
         raise TaskNotFound
     target = persistence.get_user_task_submission_target(
@@ -201,6 +203,9 @@ def submit_user_task(
                 profile_snapshot=profile_snapshot,
                 submitted_at=submitted_at,
                 client_metadata=client_metadata,
+                capture_method=measurement.capture_method if measurement is not None else None,
+                capture_mode=measurement.capture_mode if measurement is not None else None,
+                duration_ms=measurement.duration_ms if measurement is not None else None,
                 user_id=user_id,
             )
         except TaskRecordConflictError as error:
@@ -214,6 +219,7 @@ def submit_and_dispatch_user_task(
     user_id: int,
     channel: str,
     client_metadata: dict[str, object] | None = None,
+    measurement: TaskMeasurementData | None = None,
 ) -> TaskSummaryData:
     """提交草稿并仅在数据库事务提交后立即尝试派发消息。"""
     with transaction.atomic():
@@ -222,6 +228,7 @@ def submit_and_dispatch_user_task(
             user_id=user_id,
             channel=channel,
             client_metadata=client_metadata,
+            measurement=measurement,
         )
         transaction.on_commit(lambda: dispatch_task(task.task_id))
     return task
@@ -265,6 +272,15 @@ def read_user_task(*, task_id: int, user_id: int, channel: str) -> TaskDetailDat
         quality_failure = quality_rejection_from_mapping(record.failure_detail.get("quality"))
     return TaskDetailData(
         **summary.model_dump(),
+        measurement=(
+            TaskMeasurementData(
+                capture_method=record.capture_method,
+                capture_mode=record.capture_mode,
+                duration_ms=record.duration_ms,
+            )
+            if record.capture_method is not None
+            else None
+        ),
         result_payload=(record.result_payload if record.status == "SUCCEEDED" else None),
         failure_code=record.failure_code if record.status == "FAILED" else None,
         failure_message=(record.failure_message if record.status == "FAILED" else None),

@@ -18,6 +18,7 @@ from health_service.application.tasks import (
     upload_task_input,
 )
 from health_service.infrastructure.auth.access import ChannelAccessAuth
+from health_service.schemas.internal.tasks import TaskMeasurementData
 from health_service.schemas.requests.tasks import (
     CreateTaskRequest,
     SubmitTaskRequest,
@@ -214,7 +215,7 @@ async def submit_channel_task(
     task_id: int,
     body: Annotated[SubmitTaskRequest, Body(None)],
 ):
-    """校验当前选中输入、冻结本人资料并提交草稿。"""
+    """校验输入并原子冻结本人资料、可选采集属性及私有元数据。"""
     require_authenticated_channel(request, channel)
     task = await sync_to_async(
         submit_and_dispatch_user_task,
@@ -224,5 +225,10 @@ async def submit_channel_task(
         user_id=request.user.pk,
         channel=channel,
         client_metadata=body.client_metadata if body is not None else None,
+        measurement=(
+            TaskMeasurementData(**body.measurement.model_dump())
+            if body is not None and body.measurement is not None
+            else None
+        ),
     )
     return success_response(request, to_task_summary_response(task))

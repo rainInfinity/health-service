@@ -4,6 +4,7 @@ from django.urls import path
 from health_service.api.exceptions import register_exception_handlers
 from health_service.api.v1.auth import router as account_auth_router
 from health_service.api.v1.catalog import router as catalog_router
+from health_service.api.v1.measurements import router as measurement_router
 from health_service.api.v1.tasks import router as task_router
 from health_service.api.v1.users import router as account_users_router
 from ninja.renderers import JSONRenderer
@@ -17,5 +18,6 @@ api.add_router("", account_auth_router)
 api.add_router("", account_users_router)
 api.add_router("", catalog_router)
 api.add_router("", task_router)
+api.add_router("", measurement_router)
 
 urlpatterns = [path("api/v1/", api.urls)]

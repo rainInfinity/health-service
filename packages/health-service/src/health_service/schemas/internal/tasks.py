@@ -1,9 +1,24 @@
 """定义不含惰性 ORM 关系的任务查询结果。"""
 
 from datetime import datetime
+from typing import Literal
 
 from health_inference import QualityRejection
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
+
+
+class TaskMeasurementData(BaseModel):
+    """在提交与详情之间传递已冻结的完整采集属性。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    capture_method: Literal["fingertip", "fingertip_chest"] = Field(
+        description="客户端自报采集方式，不证明身体位置或医学有效性"
+    )
+    capture_mode: Literal["active"] = Field(description="客户端自报主动采集来源")
+    duration_ms: StrictInt = Field(
+        gt=0, le=2**63 - 1, description="实际时长，严格正整数毫秒"
+    )
 
 
 class TaskRecordData(BaseModel):
@@ -33,6 +48,9 @@ class TaskRecordData(BaseModel):
         default=None,
         description="仅任务详情加载的私有失败 JSON",
     )
+    capture_method: str | None = Field(default=None, description="详情加载的冻结采集方式")
+    capture_mode: str | None = Field(default=None, description="详情加载的冻结采集来源")
+    duration_ms: int | None = Field(default=None, description="详情加载的实际毫秒时长")
 
 
 class TaskSummaryData(BaseModel):
@@ -56,6 +74,10 @@ class TaskSummaryData(BaseModel):
 
 class TaskDetailData(TaskSummaryData):
     """保存本人任务的权威结果、安全摘要或类型化质量拒绝。"""
+
+    measurement: TaskMeasurementData | None = Field(
+        default=None, description="完整冻结采集属性；草稿及未提供属性的旧任务为 null"
+    )
 
     result_payload: dict[str, object] | None = Field(
         default=None,

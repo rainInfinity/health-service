@@ -77,8 +77,28 @@ class TaskPageResponse(Schema):
     limit: int = Field(description="本页条数上限")
 
 
+class TaskMeasurementResponse(Schema):
+    """只公开冻结采集属性的三项白名单字段。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    capture_method: Literal["fingertip", "fingertip_chest"] = Field(
+        alias="captureMethod", description="客户端自报采集方式"
+    )
+    capture_mode: Literal["active"] = Field(
+        alias="captureMode", description="客户端自报主动采集来源"
+    )
+    duration_ms: int = Field(
+        alias="durationMs", gt=0, le=2**63 - 1, description="实际采集时长，单位毫秒"
+    )
+
+
 class TaskDetailResponse(TaskSummaryResponse):
     """公开权威成功结果或安全失败摘要，不暴露内部诊断。"""
+
+    measurement: TaskMeasurementResponse | None = Field(
+        default=None, description="冻结采集属性；未提供时为 null"
+    )
 
     result_payload: dict[str, object] | None = Field(
         default=None,
@@ -159,6 +179,15 @@ def to_task_detail_response(task: TaskDetailData) -> TaskDetailResponse:
         submitted_at=task.submitted_at,
         started_at=task.started_at,
         finished_at=task.finished_at,
+        measurement=(
+            TaskMeasurementResponse(
+                capture_method=task.measurement.capture_method,
+                capture_mode=task.measurement.capture_mode,
+                duration_ms=task.measurement.duration_ms,
+            )
+            if task.measurement is not None
+            else None
+        ),
         result_payload=task.result_payload,
         failure_code=task.failure_code,
         failure_message=task.failure_message,
