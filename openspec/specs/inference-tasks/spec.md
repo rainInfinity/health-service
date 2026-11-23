@@ -92,11 +92,15 @@
 - **THEN** 系统按创建时间和任务 ID 的稳定倒序返回不超过请求上限的摘要，不载入大结果作为默认列表内容
 
 ### Requirement: 普通用户只看到安全失败摘要
-系统 MUST 在失败详情中向普通用户返回稳定失败代码、安全摘要和完成时间，并仅允许额外公开符合质量拒绝契约的 `qualityFailure`。系统 MUST NOT 直接公开内部诊断详情、异常堆栈、原始输入、完整健康资料快照或本地绝对路径；类型化质量信息不构成开放任意 `failureDetail` 的许可。
+系统 MUST 在任务失败详情中向普通用户返回稳定失败代码、安全摘要和完成时间，并仅允许额外公开符合质量拒绝契约的 qualityFailure。场景汇总中的失败成员 MUST 仅公开 algorithmKey、status、空 result、failureCode、failureMessage 和符合质量拒绝契约的可空 qualityFailure。系统 MUST NOT 直接公开内部诊断详情、异常堆栈、原始输入、完整健康资料快照或本地绝对路径；类型化成员结果和质量信息不构成开放任意 failureDetail 的许可。
 
 #### Scenario: 读取计算或结果失败
 - **WHEN** 用户查询具有内部失败诊断的本人任务
 - **THEN** 返回安全失败码及固定摘要，仅在满足质量拒绝契约时额外返回白名单质量信息，不把诊断中的内部字段直接序列化给用户
+
+#### Scenario: 读取场景内成员失败
+- **WHEN** 用户查询本人正常完成汇总的场景，其中某成员失败
+- **THEN** 只在对应成员中返回安全失败代码、摘要及合法质量明细，不暴露内部失败诊断，也不把成员失败移到顶层覆盖整个场景
 
 ### Requirement: 质量拒绝详情按原因公开明细
 本人任务详情 MUST 提供可空的 `qualityFailure`。合法质量拒绝的该对象 MUST 含稳定原因码 `reason` 和对应的 `details`；`LOW_SCORE` 的明细仅公开实际 `score`、`threshold`，`NO_VALID_SIGNAL` 的明细为 `null`。质量拒绝任务仍为 `FAILED`，`result` 为 `null`；详情查询成功仍使用 HTTP 200 和外层业务码 `OK`。
@@ -110,15 +114,15 @@
 - **THEN** 详情返回该原因且 `details` 为 `null`，不提供虚构分数或默认阈值
 
 ### Requirement: 质量信息只从合法失败记录投影
-系统 MUST 只在任务为 `FAILED`、失败码为 `INFERENCE.QUALITY_REJECTED` 且原因及所需明细合法时投影非空 `qualityFailure`；其余情况 MUST 返回 `null`。投影 MUST 显式选择允许公开的字段，历史记录缺失或损坏不得使详情查询失败，也不得补造原因、分数或阈值。
+系统 MUST 只在任务为 FAILED、失败码为 INFERENCE.QUALITY_REJECTED 且原因及所需明细合法时投影非空的任务顶层 qualityFailure；其余情况该顶层字段 MUST 为 null。投影 MUST 显式选择允许公开的字段，历史记录缺失或损坏不得使详情查询失败，也不得补造原因、分数或阈值。场景 result.results 内的成员 qualityFailure MUST 单独遵循对应成员的 FAILED 状态、质量失败码和同一白名单契约，不以任务 SUCCEEDED 为由抹去合法成员拒绝信息。
 
 #### Scenario: 查询其他状态或普通失败
 - **WHEN** 用户查询草稿、已提交、运行、成功任务或普通失败任务
-- **THEN** `qualityFailure` 为 `null`；即使普通失败的内部诊断含类似质量字段，也不将其解释为质量拒绝
+- **THEN** 顶层 qualityFailure 为 null；即使普通失败的内部诊断含类似质量字段，也不将其解释为质量拒绝
 
 #### Scenario: 查询缺少或损坏质量明细的历史失败
 - **WHEN** 质量拒绝记录没有质量信息、原因未知、原因与明细不匹配、缺少必需数值或数值非法
-- **THEN** 详情正常返回已有安全失败摘要，`qualityFailure` 为 `null`，不尝试重新执行或补齐诊断
+- **THEN** 详情正常返回已有安全失败摘要，顶层 qualityFailure 为 null，不尝试重新执行或补齐诊断
 
 #### Scenario: 内部质量诊断附带私有字段
 - **WHEN** 合法质量原因及明细之外还存在路径、原始数据或其他未声明诊断键
@@ -131,6 +135,10 @@
 #### Scenario: 越权读取质量拒绝
 - **WHEN** 用户查询其他账号或其他来源渠道的质量拒绝任务
 - **THEN** 系统沿用任务归属规则返回资源不存在，不泄露原因、明细或任务存在性
+
+#### Scenario: 场景成功与成员质量拒绝并存
+- **WHEN** 场景正常完成且其中 diabetes 合法质量拒绝
+- **THEN** 任务顶层 qualityFailure 为 null，result.results.diabetes.qualityFailure 保留合法原因及白名单明细，不为成功成员生成质量拒绝
 
 ### Requirement: 最终提交可冻结可选客户端元数据
 普通用户最终提交草稿时 MAY 提供可扩展的 JSON 对象 `clientMetadata`。成功提交 MUST 将其作为独立于健康资料的任务快照持久化，并与任务状态转换原子完成；省略或提供 `null` 表示没有元数据，非对象值 MUST 被拒绝。提交后元数据不可修改，普通任务响应、查询接口和日志 MUST NOT 暴露其内容。
@@ -154,3 +162,88 @@
 #### Scenario: 已提交任务再次提交
 - **WHEN** 用户对已提交任务再次提交不同客户端元数据
 - **THEN** 请求按既有状态冲突规则拒绝，已冻结的元数据保持不变
+
+### Requirement: 场景详情区分执行状态与测量结局
+场景任务详情 MUST 保留现有响应包装、摘要、固定版本和时间字段。任务 SUCCEEDED MUST 表示场景已完成全部成员调用与合法汇总，而非所有测量成功；result.outcome MUST 明确为 ALL_SUCCEEDED、PARTIALLY_SUCCEEDED 或 ALL_FAILED。正常汇总的顶层 failureCode、failureMessage、qualityFailure MUST 为空。只有场景自身失败时任务为 FAILED 且 result 为空；查询成功仍使用 HTTP 200 和外层业务码 OK。
+
+#### Scenario: 前端展示部分有效结果
+- **WHEN** 本人 PPG 场景包含成功的 hr_br、spo2 和失败的 diabetes
+- **THEN** 详情返回任务 SUCCEEDED、outcome 为 PARTIALLY_SUCCEEDED，前端可从各成功成员 result 读取数值并从 diabetes 读取失败信息
+
+#### Scenario: 前端识别全部测量失败
+- **WHEN** 场景正常汇总但所有成员失败
+- **THEN** 详情仍返回任务 SUCCEEDED 和非空 result，outcome 为 ALL_FAILED，各成员失败均可读取，不以任务状态表示测量有效
+
+#### Scenario: 场景任务自身失败
+- **WHEN** 场景整体超时或汇总无法通过最终校验
+- **THEN** 详情返回 FAILED、result 为 null 和安全任务级失败摘要，不提供未完成成员的中间结果
+
+#### Scenario: 列表保持摘要而不隐含测量结论
+- **WHEN** 用户查询包含场景任务的分页列表
+- **THEN** 列表仍不加载完整 result；摘要中的 SUCCEEDED 仅表示场景处理完成，不能单独作为全部指标成功或医学有效的依据
+
+### Requirement: 场景通过既有模型与任务接口调用
+系统 MUST 通过现有模型管理流程为两个新场景配置对应名称、发布版本和渠道选择；用户 MUST 继续使用该渠道目录返回的 modelId 创建任务、上传 requiredInputs、提交和查询详情，不增加客户端任意成员或版本选择。独立算法目录、已有任务及旧结果格式 MUST 保持，不自动修改现有渠道选择或把历史单算法结果改造成场景结构。
+
+#### Scenario: 配置并调用新场景
+- **WHEN** 管理人员分别配置名称为统一PPG场景、统一PPG+ACC场景的合法场景模型并选择到目标渠道
+- **THEN** 用户可从原模型目录获得场景 modelId、版本、requiredInputs 和 isExample=false，使用原任务接口完成一次场景测量
+
+#### Scenario: 历史单算法详情不被改写
+- **WHEN** 新场景发布后用户读取旧的 HR/BR、血氧、糖尿病风险或血压任务
+- **THEN** 其固定模型、版本、状态、原始结果字段和下载逻辑名保持不变，不强制增加 results 或 outcome
+
+#### Scenario: 非本人场景详情不可见
+- **WHEN** 其他账号或不匹配来源渠道请求场景任务详情
+- **THEN** 按既有任务归属规则拒绝，不泄露任何成员结果、失败信息或任务存在性
+
+
+### Requirement: 最终提交可冻结类型化采集属性
+最终提交 MUST 支持与 `clientMetadata` 并列的可选 `measurement` 对象；对象非空时 MUST 同时包含 `captureMethod`、`captureMode`、`durationMs`，不接受额外键。方式仅支持 `fingertip`、`fingertip_chest`，来源仅支持 `active`，时长为有符号 64 位整数范围内的严格正整数毫秒。该对象 MUST 不接收检测时间、账号、渠道、模型或版本覆盖；产品检测时间继续使用服务端冻结的 `submittedAt`。
+
+#### Scenario: 提交完整采集属性
+- **WHEN** 用户向合法草稿提交方式为 `fingertip_chest`、来源为 `active`、实际时长为正整数的 `measurement`
+- **THEN** 服务端按原提交检查接受任务，独立保存该对象和可选客户端元数据，不把它合并进资料快照
+
+#### Scenario: 旧提交保持兼容
+- **WHEN** 用户提交合法草稿时不传请求体、使用空对象、仅提供 `clientMetadata`，或令 `measurement` 为 `null`
+- **THEN** 任务仍可提交，采集属性保存为缺失，不用默认主动来源、目标时长、输入文件或模型算法补造属性
+
+#### Scenario: 采集对象不完整或类型非法
+- **WHEN** 提交非对象采集属性、缺少任一必填键、空对象、未知方式、被动来源，或时长为布尔值、字符串、零、负数、小数、超出存储范围的整数
+- **THEN** 返回 HTTP 422 和 `INVALID_INPUT`，任务不转为已提交，不保存部分采集属性
+
+#### Scenario: 不允许客户端覆盖检测时间和归属
+- **WHEN** `measurement` 中提供 `capturedAt`、`submittedAt`、用户、渠道、模型、版本或其他未声明字段
+- **THEN** 拒绝输入，不使用客户端字段覆盖服务端提交时间、任务归属或冻结版本
+
+### Requirement: 采集属性与提交冻结原子且不可改写
+采集属性 MUST 与健康资料快照、客户端元数据、提交时间和草稿到已提交的转换在同一提交事务内保存。提交后 MUST 不允许修改或重新提交采集属性；后台派发、执行、租约恢复和结果保存不得改变这些值。客户端自报属性仅为记录，不证明设备身份、身体位置或医学有效性。
+
+#### Scenario: 提交事务失败
+- **WHEN** 采集属性写入后提交事务因其他错误回滚
+- **THEN** 任务及全部提交快照一同回滚，不留下已冻结的部分采集属性
+
+#### Scenario: 重复或并发提交
+- **WHEN** 同一草稿以不同采集属性并发或先后提交
+- **THEN** 至多一份成功冻结，其他请求沿用 HTTP 409 冲突，已接受属性和提交时间不被改写
+
+#### Scenario: 后台恢复执行
+- **WHEN** 已提交任务经历消息补发或租约恢复
+- **THEN** 原采集属性和首次提交时间保持不变，不因执行重试重新确定产品检测时间
+
+### Requirement: 本人任务详情只公开类型化采集属性
+本人任务详情 MUST 新增可空 `measurement`：有属性时仅包含声明的三项，没有属性时为 `null`。任务摘要与提交响应 MUST 保持既有摘要合同，不为此加载或公开私有元数据；任务完整结果、失败信息及文件授权合同 MUST 保持不变。
+
+#### Scenario: 查询已冻结采集属性
+- **WHEN** 用户读取本人当前渠道任务详情且该任务保存了采集属性
+- **THEN** 详情返回原冻结 `measurement` 和既有 `submittedAt`，不返回 `clientMetadata`、完整资料快照或内部诊断
+
+#### Scenario: 查询旧任务或草稿
+- **WHEN** 查询未保存采集属性的旧任务或尚未提交的草稿
+- **THEN** `measurement` 为 `null`，其他详情字段沿用原合同
+
+#### Scenario: 列表与越权读取
+- **WHEN** 用户查询任务列表，或访问其他账号／来源渠道的任务详情
+- **THEN** 列表仍为原摘要，不增加采集对象；越权详情继续返回资源不存在，不泄露采集信息
+
