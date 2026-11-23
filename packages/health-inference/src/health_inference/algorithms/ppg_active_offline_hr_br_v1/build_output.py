@@ -14,7 +14,8 @@ from health_inference.utils.ppg_input import PPGInput
 _HR_METRIC = "hr"
 _BR_METRIC = "br"
 _QUALITY_THRESHOLD = 70
-_MAX_BREATHING_RATE_BPM = 18.0
+_MIN_BREATHING_RATE_BPM = 8.0
+_MAX_BREATHING_RATE_BPM = 20.0
 _PPG_OUTPUT_NAME = "ppg-processed.csv"
 _RSP_OUTPUT_NAME = "rsp-processed.csv"
 
@@ -32,7 +33,7 @@ def build_output(
     if not _is_finite_float(prediction.hr) or not _is_finite_float(prediction.br):
         raise InferenceError("RESULT.INVALID_OUTPUT", "推理结果无效")
 
-    br = min(prediction.br, _MAX_BREATHING_RATE_BPM)
+    br = max(_MIN_BREATHING_RATE_BPM, min(prediction.br, _MAX_BREATHING_RATE_BPM))
     ppg_path = inference_input.output_dir / _PPG_OUTPUT_NAME
     rsp_path = inference_input.output_dir / _RSP_OUTPUT_NAME
     output = InferenceOutput(
@@ -80,7 +81,7 @@ def valid_output(output: InferenceOutput) -> None:
         or type(metrics[_BR_METRIC]) is not float
         or metrics[_HR_METRIC] != hr
         or metrics[_BR_METRIC] != br
-        or br > _MAX_BREATHING_RATE_BPM
+        or not _MIN_BREATHING_RATE_BPM <= br <= _MAX_BREATHING_RATE_BPM
     ):
         raise InferenceError("RESULT.INVALID_OUTPUT", "算法结果格式无效")
     if (

@@ -1,4 +1,4 @@
-"""验证输出构建、BR 上限、非有限拒绝和最终结果校验。"""
+"""验证输出构建、BR 范围、非有限拒绝和最终结果校验。"""
 
 import csv
 import math
@@ -54,14 +54,23 @@ def _output_context(
 
 @pytest.mark.parametrize(
     ("raw_br", "expected_br"),
-    [(-4.125, -4.125), (18.0, 18.0), (21.75, 18.0)],
+    [
+        (-4.125, 8.0),
+        (7.999, 8.0),
+        (8.0, 8.0),
+        (12.3456789, 12.3456789),
+        (18.5, 18.5),
+        (20.0, 20.0),
+        (20.001, 20.0),
+        (21.75, 20.0),
+    ],
 )
-def test_build_output_preserves_finite_hr_and_only_caps_br(
+def test_build_output_preserves_finite_hr_and_clamps_br(
     tmp_path: Path,
     raw_br: float,
     expected_br: float,
 ):
-    """保留有限 HR 与低 BR，只将超上限 BR 截为 18。"""
+    """保留有限 HR，将 BR 限制在闭区间 [8, 20] 且不舍入区间内数值。"""
     inference_input, loaded, prepared, quality = _output_context(tmp_path)
     output = build_output(
         inference_input,
@@ -122,6 +131,24 @@ def test_valid_output_rejects_metrics_that_disagree_with_payload(tmp_path: Path)
     output = InferenceOutput(
         payload={"hr": 72.0, "br": 18.0, "quality": {"score": 85.0, "threshold": 70}},
         metrics={"hr": 72.0, "br": 17.99},
+        output_files={
+            "processed_ppg": tmp_path / "ppg-processed.csv",
+            "processed_rsp": tmp_path / "rsp-processed.csv",
+        },
+    )
+
+    with pytest.raises(InferenceError) as error:
+        valid_output(output)
+
+    assert error.value.code == "RESULT.INVALID_OUTPUT"
+
+
+@pytest.mark.parametrize("br", [7.999, 20.001])
+def test_valid_output_rejects_br_outside_range(tmp_path: Path, br: float):
+    """最终结果校验拒绝载荷与指标一致但呼吸率超出范围的结果。"""
+    output = InferenceOutput(
+        payload={"hr": 72.0, "br": br, "quality": {"score": 85.0, "threshold": 70}},
+        metrics={"hr": 72.0, "br": br},
         output_files={
             "processed_ppg": tmp_path / "ppg-processed.csv",
             "processed_rsp": tmp_path / "rsp-processed.csv",
