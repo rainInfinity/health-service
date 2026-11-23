@@ -275,6 +275,61 @@ def test_resolve_rejects_symlink_escape_and_missing_files(tmp_path: Path):
         storage.resolve_file(StorageArea.TASK_DATA, "missing.csv")
 
 
+@pytest.mark.parametrize(
+    "storage_key",
+    ["", ".", "/etc/passwd", "../outside", "nested/../../outside", "C:/outside", "a\\b"],
+)
+def test_artifact_candidate_rejects_unsafe_registered_keys(tmp_path: Path, storage_key: str):
+    """延迟成员加载不允许非法登记键形成候选引用。"""
+    with pytest.raises(InvalidStorageKey):
+        _storage(tmp_path).resolve_model_artifact_candidate(storage_key)
+
+
+def test_artifact_candidate_defers_only_file_availability(tmp_path: Path):
+    """候选允许最终文件缺失或为目录，默认解析仍要求普通文件。"""
+    storage = _storage(tmp_path)
+    directory = storage.model_artifact_root / "version"
+    directory.mkdir()
+    for key in ("version/missing.onnx", "version"):
+        candidate = storage.resolve_model_artifact_candidate(key)
+        assert candidate == storage.model_artifact_root / key
+        with pytest.raises(StorageFileNotFound):
+            storage.resolve_file(StorageArea.MODEL_ARTIFACT, key)
+    artifact = directory / "model.onnx"
+    artifact.write_bytes(b"registered model")
+    assert storage.resolve_model_artifact_candidate("version/model.onnx").read_bytes() == (
+        b"registered model"
+    )
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_artifact_candidate_rejects_existing_symlink_escape(tmp_path: Path, dangling: bool):
+    """最终文件缺失也不能绕过已有父目录及文件符号链接的根边界。"""
+    storage = _storage(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if not dangling:
+        (outside / "private.onnx").write_bytes(b"private")
+    (storage.model_artifact_root / "escape").symlink_to(outside, target_is_directory=True)
+    (storage.model_artifact_root / "model.onnx").symlink_to(outside / "private.onnx")
+    for key in ("escape/private.onnx", "model.onnx"):
+        with pytest.raises(InvalidStorageKey):
+            storage.resolve_model_artifact_candidate(key)
+
+
+def test_artifact_candidate_requires_existing_original_root(tmp_path: Path):
+    """已创建的存储对象不能在根目录消失或被越界链接替换后继续延迟解析。"""
+    storage = _storage(tmp_path)
+    storage.model_artifact_root.rmdir()
+    with pytest.raises(StorageFileNotFound):
+        storage.resolve_model_artifact_candidate("version/model.onnx")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    storage.model_artifact_root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(InvalidStorageKey):
+        storage.resolve_model_artifact_candidate("version/model.onnx")
+
+
 def test_legacy_storage_keys_remain_readable(tmp_path: Path):
     """验证旧输入、模型制品和执行输出相对键仍可读取。"""
     storage = _storage(tmp_path)

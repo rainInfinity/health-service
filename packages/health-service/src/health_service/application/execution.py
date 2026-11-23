@@ -11,12 +11,9 @@ from health_inference import (
     AlgorithmDefinition,
     InferenceError,
     InferenceOutput,
-    QualityRejectedError,
-    QualityRejection,
-    QualityRejectionReason,
     get_algorithm,
 )
-from health_inference.exceptions import InputError, InputErrorReason
+from health_inference.failures import safe_failure_fields
 
 from health_service.inference_logging import log_inference_event
 from health_service.infrastructure.persistence import catalog as catalog_persistence
@@ -31,41 +28,6 @@ from health_service.schemas.internal.execution import (
     ProjectedTaskMetricData,
 )
 
-_SAFE_FAILURE_MESSAGES = {
-    "TASK.INVALID_VERSION": "固定模型版本不可用",
-    "TASK.UNKNOWN_ALGORITHM": "算法不可用",
-    "TASK.RETRY_EXHAUSTED": "任务已达到最大执行次数",
-    "TASK.MODEL_SWITCHED": "任务使用的模型版本已切换",
-    "TASK.EXECUTION_ERROR": "任务处理失败",
-    "INFERENCE.INVALID_INPUT": "推理输入无效",
-    "INFERENCE.INVALID_ARTIFACT": "模型制品不可用",
-    "INFERENCE.MISSING_PROFILE": "计算所需资料缺失",
-    "INFERENCE.INVALID_PARAMETERS": "模型参数无效",
-    "INFERENCE.INVALID_PROFILE": "提交资料快照无效",
-    "INFERENCE.OUTPUT_UNAVAILABLE": "计算输出目录不可用",
-    "INFERENCE.STORAGE_UNAVAILABLE": "推理文件存储不可用",
-    "INFERENCE.EXECUTION_ERROR": "推理执行失败",
-    "INFERENCE.EXECUTION_TIMEOUT": "推理执行超时",
-    "RESULT.INVALID_OUTPUT": "推理结果格式无效",
-}
-
-_INPUT_FAILURE_MESSAGES = {
-    InputErrorReason.CSV_FORMAT: "PPG CSV 格式无效",
-    InputErrorReason.MISSING_COLUMN: "PPG CSV 缺少必需列",
-    InputErrorReason.INVALID_CHANNELS: "PPG 必须完整提供一组 RGB 或 YUV 通道",
-    InputErrorReason.INVALID_NUMERIC_VALUE: "PPG 通道必须为合法数值",
-    InputErrorReason.NON_FINITE_VALUE: "PPG 输入数值必须为有限值",
-    InputErrorReason.INVALID_TIMESTAMP: "PPG 时间戳必须为有限且严格递增的毫秒数值",
-    InputErrorReason.UNSUPPORTED_BLOCK_LAYOUT: "当前算法版本仅支持单块 PPG",
-    InputErrorReason.INSUFFICIENT_DATA: "PPG 数据不足以执行本算法所需处理",
-    InputErrorReason.INVALID_SAMPLING_RATE: "PPG 采样率不支持本算法所需处理",
-}
-
-_QUALITY_FAILURE_MESSAGES = {
-    QualityRejectionReason.LOW_SCORE: "信号质量评分未达到要求，请重新采集",
-    QualityRejectionReason.NO_VALID_SIGNAL: "未检测到可用信号，请重新采集",
-}
-
 
 def record_task_execution_failure(
     *,
@@ -74,7 +36,7 @@ def record_task_execution_failure(
     error: InferenceError | None,
 ) -> str | None:
     """提交安全失败终态后返回实际失败码；失权时返回空值。"""
-    failure_code, failure_message, failure_detail = _safe_failure_fields(error)
+    failure_code, failure_message, failure_detail = safe_failure_fields(error)
     committed = persistence.record_task_execution_failure(
         task_id=task_id,
         execution_token=execution_token,
@@ -85,82 +47,6 @@ def record_task_execution_failure(
     return failure_code if committed else None
 
 
-def _safe_failure_fields(
-    error: InferenceError | None,
-) -> tuple[str, str, dict[str, object] | None]:
-    """将受控输入原因和质量拒绝映射为固定安全失败。"""
-    if type(error) is InputError:
-        if getattr(error, "code", None) != "INFERENCE.INVALID_INPUT":
-            return (
-                "INFERENCE.EXECUTION_ERROR",
-                _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"],
-                None,
-            )
-        reason = getattr(error, "reason", None)
-        message = _INPUT_FAILURE_MESSAGES.get(reason) if type(reason) is InputErrorReason else None
-        return (
-            "INFERENCE.INVALID_INPUT",
-            message or _SAFE_FAILURE_MESSAGES["INFERENCE.INVALID_INPUT"],
-            None,
-        )
-    if isinstance(error, QualityRejectedError):
-        rejection = _validated_quality_rejection(error)
-        if rejection is None:
-            return (
-                "INFERENCE.EXECUTION_ERROR",
-                _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"],
-                None,
-            )
-        details = None
-        if rejection.details is not None:
-            details = {
-                "score": rejection.details.score,
-                "threshold": rejection.details.threshold,
-            }
-        return (
-            "INFERENCE.QUALITY_REJECTED",
-            _QUALITY_FAILURE_MESSAGES[rejection.reason],
-            {
-                "quality": {
-                    "reason": rejection.reason.value,
-                    "details": details,
-                }
-            },
-        )
-    if error is not None and isinstance(error.code, str):
-        message = _SAFE_FAILURE_MESSAGES.get(error.code)
-        if message is not None:
-            return error.code, message, None
-        if error.code.startswith("TASK."):
-            return (
-                "TASK.EXECUTION_ERROR",
-                _SAFE_FAILURE_MESSAGES["TASK.EXECUTION_ERROR"],
-                None,
-            )
-        if error.code.startswith("RESULT."):
-            return (
-                "RESULT.INVALID_OUTPUT",
-                _SAFE_FAILURE_MESSAGES["RESULT.INVALID_OUTPUT"],
-                None,
-            )
-    return (
-        "INFERENCE.EXECUTION_ERROR",
-        _SAFE_FAILURE_MESSAGES["INFERENCE.EXECUTION_ERROR"],
-        None,
-    )
-
-
-def _validated_quality_rejection(
-    error: QualityRejectedError,
-) -> QualityRejection | None:
-    """重建并校验异常数据，避免伪造错误码或损坏对象成为质量结论。"""
-    if error.code != "INFERENCE.QUALITY_REJECTED":
-        return None
-    try:
-        rejection = error.rejection
-        return QualityRejection(rejection.reason, rejection.details)
-    except (AttributeError, TypeError, ValueError):
-        return None
 
 
 def claim_task_for_execution(*, task_id: int) -> UUID | None:

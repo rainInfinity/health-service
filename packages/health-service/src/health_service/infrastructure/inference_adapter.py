@@ -15,6 +15,7 @@ from health_inference import (
     VersionResources,
     get_algorithm,
 )
+from health_inference.scenes import is_scene_algorithm
 
 from health_service.infrastructure.persistence import catalog as catalog_persistence
 from health_service.infrastructure.persistence import tasks as task_persistence
@@ -53,10 +54,16 @@ def _version_runtime(version_id: int) -> _VersionRuntime:
         raise InferenceError("INFERENCE.INVALID_ARTIFACT", "模型制品配置无效")
     storage = _task_storage()
     try:
-        artifact_paths = {
-            logical_name: storage.resolve_file(StorageArea.MODEL_ARTIFACT, storage_key)
-            for logical_name, storage_key in artifact_storage_keys.items()
-        }
+        if is_scene_algorithm(version.algorithm_key):
+            artifact_paths = {
+                logical_name: storage.resolve_model_artifact_candidate(storage_key)
+                for logical_name, storage_key in artifact_storage_keys.items()
+            }
+        else:
+            artifact_paths = {
+                logical_name: storage.resolve_file(StorageArea.MODEL_ARTIFACT, storage_key)
+                for logical_name, storage_key in artifact_storage_keys.items()
+            }
     except StorageError as error:
         raise InferenceError("INFERENCE.INVALID_ARTIFACT", "模型制品不可用") from error
     algorithm_runtime = algorithm.create_runtime(

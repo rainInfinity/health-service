@@ -1,121 +1,143 @@
-"""验证受控输入失败文案的白名单映射与安全降级。"""
+"""验证共享失败分类不会泄漏异常私有内容或伪造质量结论。"""
 
 from pathlib import Path
 
 import pytest
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.build_output import valid_output
-from health_inference.exceptions import (
-    InferenceError,
-    InputError,
-    InputErrorReason,
+from health_inference import (
+    LowScoreDetails,
+    QualityRejectedError,
+    QualityRejection,
+    QualityRejectionReason,
 )
+from health_inference.algorithms.ppg_active_offline_hr_br_v1.build_output import valid_output
+from health_inference.exceptions import InferenceError, InputError, InputErrorReason
+from health_inference.failures import is_safe_failure, safe_failure_fields
 from health_inference.types import InferenceOutput
 from health_inference.utils.ppg_input import load_ppg
-from health_service.application.execution import _safe_failure_fields
 
 
-@pytest.mark.parametrize(
-    ("reason", "expected_message"),
-    [
-        (InputErrorReason.CSV_FORMAT, "PPG CSV 格式无效"),
-        (InputErrorReason.MISSING_COLUMN, "PPG CSV 缺少必需列"),
-        (InputErrorReason.INVALID_CHANNELS, "PPG 必须完整提供一组 RGB 或 YUV 通道"),
-        (InputErrorReason.INVALID_NUMERIC_VALUE, "PPG 通道必须为合法数值"),
-        (InputErrorReason.NON_FINITE_VALUE, "PPG 输入数值必须为有限值"),
-        (
-            InputErrorReason.INVALID_TIMESTAMP,
-            "PPG 时间戳必须为有限且严格递增的毫秒数值",
-        ),
-        (InputErrorReason.UNSUPPORTED_BLOCK_LAYOUT, "当前算法版本仅支持单块 PPG"),
-        (InputErrorReason.INSUFFICIENT_DATA, "PPG 数据不足以执行本算法所需处理"),
-        (InputErrorReason.INVALID_SAMPLING_RATE, "PPG 采样率不支持本算法所需处理"),
-    ],
-)
-def test_declared_input_reason_maps_to_fixed_public_message(
-    reason: InputErrorReason,
-    expected_message: str,
-):
-    """合法输入原因保留错误码并映射固定文案及空普通详情。"""
+@pytest.mark.parametrize("reason", list(InputErrorReason))
+def test_input_reasons_discard_exception_private_data(reason):
+    """受控输入原因不会将正文或附加诊断写入公开失败。"""
     error = InputError(reason)
-
-    fields = _safe_failure_fields(error)
-
-    assert fields == ("INFERENCE.INVALID_INPUT", expected_message, None)
+    error.safe_message = "PRIVATE-PATH-SENTINEL"
+    error.args = ("PRIVATE-BODY-SENTINEL",)
+    error.failure_detail = {"raw": "PRIVATE-INPUT-SENTINEL"}
+    code, message, detail = safe_failure_fields(error)
+    assert code == "INFERENCE.INVALID_INPUT"
+    assert detail is None
+    assert "PRIVATE-" not in repr((code, message, detail))
+    assert is_safe_failure(code, message, None)
 
 
 @pytest.mark.parametrize("reason", [None, "CSV_FORMAT", "UNKNOWN", object()])
-def test_unknown_or_corrupted_reason_uses_generic_safe_input_message(reason: object):
-    """未知或被损坏的原因不通过字符串相等伪装成白名单枚举。"""
+def test_unknown_or_corrupted_reason_uses_generic_safe_input_message(reason):
+    """未知原因降级为通用输入失败，不以字符串相等冒充枚举。"""
     error = InputError(InputErrorReason.CSV_FORMAT)
     error.reason = reason
     error.safe_message = "PRIVATE-PATH-SENTINEL"
-
-    fields = _safe_failure_fields(error)
-
-    assert fields == ("INFERENCE.INVALID_INPUT", "推理输入无效", None)
-    assert "PRIVATE-PATH-SENTINEL" not in " ".join(str(value) for value in fields)
-
-
-def test_generic_input_error_uses_safe_fallback():
-    """通用输入失败不会透出异常正文。"""
-    fields = _safe_failure_fields(
-        InferenceError("INFERENCE.INVALID_INPUT", "RAW-INPUT-SENTINEL")
+    assert safe_failure_fields(error) == safe_failure_fields(
+        InferenceError("INFERENCE.INVALID_INPUT", "PRIVATE-BODY-SENTINEL")
     )
-
-    assert fields == ("INFERENCE.INVALID_INPUT", "推理输入无效", None)
+    assert "PRIVATE-" not in repr(safe_failure_fields(error))
 
 
 @pytest.mark.parametrize(
-    ("content", "expected_message"),
+    ("content", "reason"),
     [
         (
-            ("timestampFrame,avgR,avgG,avgB,blockIndex\n0,120,128,136,1\n100,121,128,136,0\n"),
-            "当前算法版本仅支持单块 PPG",
+            "timestampFrame,avgR,avgG,avgB,blockIndex\n0,120,128,136,1\n100,121,128,136,0\n",
+            InputErrorReason.UNSUPPORTED_BLOCK_LAYOUT,
         ),
         (
-            ("timestampFrame,avgR,avgG,avgB\n0,120,128,136\n0,121,128,136\n"),
-            "PPG 时间戳必须为有限且严格递增的毫秒数值",
+            "timestampFrame,avgR,avgG,avgB\n0,120,128,136\n0,121,128,136\n",
+            InputErrorReason.INVALID_TIMESTAMP,
         ),
         (
-            ("timestampFrame,avgR,avgG,avgB\n0,120,128,136\n"),
-            "PPG 数据不足以执行本算法所需处理",
+            "timestampFrame,avgR,avgG,avgB\n0,120,128,136\n",
+            InputErrorReason.INSUFFICIENT_DATA,
         ),
     ],
 )
-def test_real_parser_errors_map_to_fixed_public_messages(
-    tmp_path: Path,
-    content: str,
-    expected_message: str,
-):
-    """真实解析器的常见输入拒绝映射为固定文案且不泄露路径。"""
+def test_real_parser_errors_keep_classification_without_path(tmp_path, content, reason):
+    """真实解析失败保留受控原因解释，文件路径不进入持久化字段。"""
     input_path = tmp_path / "private-input.csv"
     input_path.write_text(content, encoding="utf-8")
-
     with pytest.raises(InputError) as error:
         load_ppg(input_path)
-
-    fields = _safe_failure_fields(error.value)
-    assert fields == ("INFERENCE.INVALID_INPUT", expected_message, None)
+    assert error.value.reason is reason
+    fields = safe_failure_fields(error.value)
+    assert fields[0] == "INFERENCE.INVALID_INPUT"
+    assert fields[2] is None
     assert str(input_path) not in repr(fields)
 
 
 def test_non_finite_prediction_stays_a_result_failure():
-    """结果校验器拒绝非有限预测并保留结果失败分类。"""
+    """HR/BR 单项非法时整份结果被拒绝，不降级成输入或质量失败。"""
     output = InferenceOutput(
         payload={"hr": 72.0, "br": float("inf"), "quality": {"score": 85.0, "threshold": 70}},
         metrics={"hr": 72.0, "br": float("inf")},
-        output_files={
-            "processed_ppg": Path("ppg-processed.csv"),
-            "processed_rsp": Path("rsp-processed.csv"),
-        },
+        output_files={"processed_ppg": Path("ppg-processed.csv"), "processed_rsp": Path("rsp-processed.csv")},
     )
-
     with pytest.raises(InferenceError) as error:
         valid_output(output)
+    code, _, detail = safe_failure_fields(error.value)
+    assert code == "RESULT.INVALID_OUTPUT"
+    assert detail is None
 
-    assert error.value.code == "RESULT.INVALID_OUTPUT"
-    assert _safe_failure_fields(error.value) == (
-        "RESULT.INVALID_OUTPUT",
-        "推理结果格式无效",
-        None,
-    )
+
+@pytest.mark.parametrize("reason", list(QualityRejectionReason))
+def test_quality_rejection_only_persists_whitelisted_fields(reason):
+    """合法拒绝保留真实数值，额外异常属性和正文不进入持久化明细。"""
+    details = LowScoreDetails(69.999999999, 70) if reason is QualityRejectionReason.LOW_SCORE else None
+    error = QualityRejectedError(QualityRejection(reason, details))
+    error.args = ("PRIVATE-BODY-SENTINEL",)
+    error.safe_message = "PRIVATE-MESSAGE-SENTINEL"
+    error.failure_detail = {"path": "PRIVATE-PATH-SENTINEL"}
+    code, message, detail = safe_failure_fields(error)
+    expected = {"reason": reason.value, "details": None}
+    if details is not None:
+        expected["details"] = {"score": details.score, "threshold": details.threshold}
+    assert detail == {"quality": expected}
+    assert code == "INFERENCE.QUALITY_REJECTED"
+    assert "PRIVATE-" not in repr((code, message, detail))
+    assert is_safe_failure(code, message, expected)
+    assert not is_safe_failure(code, message, {**expected, "path": "PRIVATE-PATH"})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, "60", None, 70])
+def test_corrupted_quality_score_cannot_become_a_public_conclusion(value):
+    """绕过构造器篡改的评分不能产生质量拒绝或医学解释。"""
+    error = QualityRejectedError(QualityRejection(QualityRejectionReason.LOW_SCORE, LowScoreDetails(60, 70)))
+    object.__setattr__(error.rejection.details, "score", value)
+    code, message, detail = safe_failure_fields(error)
+    assert code == "INFERENCE.EXECUTION_ERROR"
+    assert detail is None
+    assert not is_safe_failure("INFERENCE.QUALITY_REJECTED", message, {"reason": "LOW_SCORE", "details": {"score": value, "threshold": 70}})
+
+
+@pytest.mark.parametrize("corruption", ["code", "reason", "details", "missing"])
+def test_forged_quality_error_falls_back_without_leaking(corruption):
+    """伪造质量码、未知原因及损坏对象均安全降级。"""
+    if corruption == "code":
+        error = InferenceError("INFERENCE.QUALITY_REJECTED", "PRIVATE-BODY-SENTINEL")
+    else:
+        error = QualityRejectedError(QualityRejection(QualityRejectionReason.LOW_SCORE, LowScoreDetails(60, 70)))
+        if corruption == "reason":
+            object.__setattr__(error.rejection, "reason", "LOW_SCORE")
+        elif corruption == "details":
+            object.__setattr__(error.rejection, "details", None)
+        else:
+            del error.rejection
+    code, message, detail = safe_failure_fields(error)
+    assert code == "INFERENCE.EXECUTION_ERROR"
+    assert detail is None
+    assert "PRIVATE-" not in message
+
+
+def test_final_failure_validation_rejects_forged_summary_and_details():
+    """最终汇总不能替换安全摘要或将普通错误包装为质量拒绝。"""
+    code, message, _ = safe_failure_fields(InferenceError("RESULT.INVALID_OUTPUT", "private"))
+    assert not is_safe_failure(code, "PRIVATE-BODY", None)
+    assert not is_safe_failure(code, message, {"reason": "NO_VALID_SIGNAL", "details": None})
+    assert not is_safe_failure("INFERENCE.QUALITY_REJECTED", message, None)

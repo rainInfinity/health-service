@@ -358,6 +358,17 @@ class LocalFileStorage:
             raise StorageFileNotFound("文件不存在")
         return resolved
 
+    def resolve_model_artifact_candidate(self, storage_key: str) -> Path:
+        """仅供固定场景延迟加载制品；校验边界但不要求最终文件存在或为普通文件。"""
+        root = self.model_artifact_root
+        parts = self._safe_parts(storage_key)
+        if not parts:
+            raise InvalidStorageKey("文件存储键无效")
+        resolved_root = self._contained_path(root, root, strict=True)
+        if not resolved_root.is_dir():
+            raise StorageError("文件存储目录不可用")
+        return self._contained_path(root, root.joinpath(*parts), strict=False)
+
     def delete_file(self, area: StorageArea, storage_key: str) -> None:
         """删除已校验的本地文件，供数据库登记失败时回滚本次写入。"""
         path = self.resolve_file(area, storage_key)

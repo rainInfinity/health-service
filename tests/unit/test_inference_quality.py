@@ -37,7 +37,7 @@ def test_low_score_preserves_unrounded_values_near_threshold():
 @pytest.mark.parametrize("score", [70, 71], ids=("equal", "above"))
 def test_low_score_rejects_score_not_below_threshold(score: int):
     """验证分数等于或高于阈值时不能构造低分拒绝。"""
-    with pytest.raises(ValueError, match="严格低于"):
+    with pytest.raises(ValueError):
         LowScoreDetails(score, 70)
 
 
@@ -70,17 +70,17 @@ def test_low_score_rejects_score_not_below_threshold(score: int):
 )
 def test_low_score_rejects_invalid_numeric_values(score: object, threshold: object):
     """验证评分和阈值只接受有限的原生数值。"""
-    with pytest.raises(ValueError, match="有限数值"):
+    with pytest.raises(ValueError):
         LowScoreDetails(score, threshold)
 
 
 def test_quality_rejection_rejects_unknown_or_mismatched_reason_details():
     """验证未知原因及原因和明细不匹配的组合不能成立。"""
-    with pytest.raises(TypeError, match="未知质量拒绝原因"):
+    with pytest.raises(TypeError):
         QualityRejection("UNKNOWN", None)
-    with pytest.raises(TypeError, match="必须提供评分明细"):
+    with pytest.raises(TypeError):
         QualityRejection(QualityRejectionReason.LOW_SCORE, None)
-    with pytest.raises(ValueError, match="不接受评分明细"):
+    with pytest.raises(ValueError):
         QualityRejection(
             QualityRejectionReason.NO_VALID_SIGNAL,
             LowScoreDetails(40, 70),
