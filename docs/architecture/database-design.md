@@ -28,6 +28,8 @@ erDiagram
 
 `health_channel_model_selection`、`health_model_version_metric` 和 `health_task_metric` 是有业务字段或约束的关联表；`health_profile` 以用户 ID 为主键表达一对一。版本指标关联只定义可投影的指标，不定义完整输出；成功结果以 `health_task.result_payload` 为准。
 
+统一离线场景不改变这些关系，也不新增迁移。一个场景 Task 的 `model_version_id` 仍只指向一个发布版本；该版本的 `health_model_artifact` 直接保存全部固定成员制品，不增加父测量、成员 Task 或其他 ModelVersion 外键。一次上传的选中输入及冻结资料由固定成员共同读取，独立模型渠道切换不改变场景解释。
+
 ## 通用抽象审计模型
 
 `AuditModel` 是 Django 的抽象模型（`abstract = True`），自身不建物理表，也不定义主键，以便 `health_profile` 继续使用共享主键。本文的 12 张 `health_*` 业务表均继承它，因此每张物理表都包含以下列；ER 图不将抽象模型画作实体。
@@ -146,7 +148,11 @@ erDiagram
 | `model_version_id` | 执行模型版本 ID | `BIGINT` | 非空，外键 → `health_model_version.id`；创建草稿时固定。 |
 | `status` | 任务状态 | `VARCHAR(16)` | 非空，默认 `DRAFT`；状态转换见后文。 |
 | `profile_snapshot` | 健康资料快照 | `JSONB` | 可空；最终提交时冻结计算所需资料。 |
-| `submitted_at` | 提交时间 | `TIMESTAMPTZ` | 可空；草稿失败时仍为空。 |
+| `submitted_at` | 提交时间 | `TIMESTAMPTZ` | 可空；服务端接受最终提交时冻结，是唯一产品检测时间，不是原生采集起点，也不以完成时间替代。 |
+| `client_metadata` | 私有客户端元数据 | `JSONB` | 可空；与采集属性独立冻结，不对普通用户公开。 |
+| `capture_method` | 采集方式 | `VARCHAR(32)` | 可空；仅 `fingertip`、`fingertip_chest`，缺失表示未知，不从输入或算法推断。 |
+| `capture_mode` | 采集来源 | `VARCHAR(16)` | 可空；当前仅 `active`，缺失表示未知。 |
+| `duration_ms` | 实际采集时长 | `BIGINT` | 可空；严格正整数毫秒，上限 `2^63-1`，不是目标时长。 |
 | `started_at` | 开始执行时间 | `TIMESTAMPTZ` | 可空。 |
 | `finished_at` | 结束时间 | `TIMESTAMPTZ` | 可空；成功或失败时记录。 |
 | `result_payload` | 完整成功结果 | `JSONB` | 可空；仅 `SUCCEEDED` 时非空，以任务固定的模型版本解释并校验其结构，是结果详情的权威记录。 |
@@ -189,8 +195,11 @@ erDiagram
 - `health_task_input_file` 使用条件唯一约束 `(task_id, logical_name) WHERE is_selected = TRUE`；未选中的历史上传可以有多条。文件大小必须大于零，仅将已完整上传的文件登记为有效记录。
 - `health_task` 使用检查约束保证仅 `SUCCEEDED` 状态的任务有非空 `result_payload`，且成功任务必须有结果；`health_task_metric.task_id` 的外键只能保证任务存在，指标行仅属于成功任务由同一事务中的用例保证。
 - `health_task` 的执行租约约束要求 `RUNNING` 任务同时具有 `execution_token` 与 `lease_expires_at`，其他状态二者均为空；`attempt_count` 不得为负数。成功结果约束继续保证仅 `SUCCEEDED` 有 `result_payload`。
+- 采集属性使用 `health_task_measurement_valid` 显式保证三项 `IS NULL`，或三项 `IS NOT NULL` 且枚举、正时长均合法，防止 SQL NULL 三值逻辑放过部分属性；`health_task_draft_measurement_null` 要求草稿三项全空。属性、资料快照、私有元数据、提交时间及状态在原提交事务内冻结，后台更新不得改写。
+- 按提交时间查询使用 `htask_user_chan_submit_idx(user_id, channel_id, submitted_at DESC, id DESC)`，保留原有索引；只用账号、来源渠道及真实提交时间定位，不新增采集时间列。
 - 任务列表建议使用 `(user_id, created_at DESC)`；渠道切换时批量终止草稿建议使用 `(channel_id, model_version_id, status)`；判断某版本是否仍有已提交或执行中的任务建议使用 `(model_version_id, status)`。实际索引以查询量和执行计划验证后确定。
 - 数值指标的范围筛选和排序建议使用 `health_task_metric(metric_id, numeric_value, task_id)`；布尔指标索引按实际查询负载决定。已知 `metric_id` 时，可直接通过 `task_id` 关联任务做归属、渠道和时间过滤，无需让常用统计查询经过版本指标关联表。结果详情读取 `health_task.result_payload`；任务列表只选摘要字段，不默认读取完整结果或对任意 JSON 路径建立索引。
+- 采集属性迁移只添加可空列、检查约束及索引，不回填旧记录，不修改权威结果、指标投影或已发布版本。旧任务没有属性仍保持未知；应用回滚应保留新增列和已保存值，不自动反向迁移删除采集属性。
 
 ## 写入与生命周期约束
 
@@ -214,6 +223,8 @@ erDiagram
 
 任务进入 `FAILED` 时，同一事务写入 `finished_at` 和 `failure_code`，可附 `failure_message`、`failure_detail`；非失败任务不保留失败字段。代码按来源区分，例如草稿因版本切换终止使用 `TASK.MODEL_SWITCHED`，质检不通过使用 `INFERENCE.QUALITY_REJECTED`，模型输出无法按结果契约解释使用 `RESULT.INVALID_OUTPUT`。即使在草稿阶段失败，也只记录任务失败，`result_payload` 保持为空且不写指标投影行。
 
+场景的成员失败保存在合法成功汇总的 `result_payload.results`，不写 Task 的顶层失败字段；成员只公开固定安全代码、摘要及合法可空质量拒绝。只有场景自身错误（包括整体超时、不可读原始输入及最终汇总无效）才进入 Task `FAILED`，保持 `result_payload=NULL`、无指标。成员失败不会扩展数据库任务状态。
+
 `failure_detail` 可记录质检分数、阈值或输出校验问题等结构化诊断；对外只返回允许公开的字段，不暴露堆栈、原始健康数据及本地绝对路径。数据库或 Redis 等暂时性故障不能仅因抛出异常就记成终态 `FAILED`；重试与恢复规则仍需单独设计。
 
 ### 成功结果与查询投影
@@ -221,6 +232,8 @@ erDiagram
 任务成功时，`health_task.result_payload` 保存该次预测的完整结构化输出，以任务固定的模型版本及对应算法规则校验；不同模型和版本可以有不同结构。结果详情直接读取该字段，不从指标行反向组装，也不重新执行模型。对外响应按 API 契约转换，不将存储结构直接当作统一的 HTTP Schema。
 
 `health_model_version_metric` 只选择该版本需要支持筛选和统计的稳定指标，算法适配器从结果中提取实际存在的可投影值，按 `health_metric_definition` 校验类型和语义。`health_task_metric` 只保存这些值；未产生的指标不写行，不以零代替，也不要求指标集合覆盖全部输出。数据库保证外键、单项唯一及数值/布尔列互斥；`result_payload`、指标投影与任务的 `SUCCEEDED` 状态在同一事务中写入，成功后不分别修改，避免重复数据不一致。指标语义或单位变化时使用新的代码，不能混合统计。
+
+场景正常汇总为 `ALL_FAILED` 时，Task 仍是 `SUCCEEDED`，`result_payload` 保存完整非空成员失败汇总，但 `health_task_metric` 为零行，顶层失败字段为空；部分成功只投影成功成员实际产生且场景版本选中的项。两种情况都沿用原成功事务、执行令牌及租约检查，回滚或失租不能留下权威部分结果。处理后文件引用仅登记成功成员，以成员前缀区分逻辑名，并继续使用任务/令牌下的不可变存储键。
 
 输出中如有处理后文件，应保存受保护的相对存储键而不是绝对路径或公开 URL；逐窗口数组等较大内容是否直接存入 `result_payload`、改存文件，仍需按实际规模和业务访问需求确定。
 

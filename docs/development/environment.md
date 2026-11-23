@@ -135,6 +135,12 @@ var/
 
 正式结果入口是 `<渠道代码>/<任务创建日期>/outputs/<task_id>/`，由服务端管理的相对目录符号链接指向同一任务根目录内已成功执行的 `.executions/<task_id>/<execution_token>/`。目录整组切换，保留算法原文件名，例如 `ppg-processed.csv`；算法只写本次 `output_dir`，不得写入或推导正式目录。执行临时文件不进入正式结果目录。
 
+固定场景沿用同一目录链接发布机制：统一PPG场景的执行目录包含 `hr_br/ppg-processed.csv`、`hr_br/rsp-processed.csv`、`spo2/ppg-processed.csv`、`diabetes/ppg-processed.csv`；统一PPG+ACC场景只有 `bp/ppg-processed.csv`、`bp/scg-processed.csv`。正式入口保留这些成员子目录，例如 `ios-cn/<YYYYMMDD>/outputs/<task_id>/spo2/ppg-processed.csv`。结果登记逻辑名分别为 `hr_br_processed_ppg`、`hr_br_processed_rsp`、`spo2_processed_ppg`、`diabetes_processed_ppg` 或 `bp_processed_ppg`、`bp_processed_scg`。各文件保留原算法表头和字节，不复制到扁平目录；失败成员的本次子目录必须安全清理后才允许整组发布，全部成员失败不创建正式目录。
+
+场景配置仅通过现有管理流程在隔离联调环境进行：名称为“统一PPG场景”及“统一PPG+ACC场景”，算法 key 分别为 `ppg.active.offline.all.v1`、`ppg_acc.active.offline.all.v1`，参数为空，完整制品清单见[模型与算法开发](models-and-algorithms.md)。一个场景发布版本直接固定全部成员制品，创建任务须使用当前渠道模型目录实际返回的 ID；不动态引用独立模型渠道版本。此变更无需新增配置、依赖或数据库迁移，不自动发布生产制品或切换原渠道；`isExample=false` 不代表临床认证。
+
+执行时只有这两个固定场景允许安全解析尚未实际加载的候选制品路径，最终文件缺失、类型错误或模型损坏在成员初始化边界处理。根目录、登记键和现有符号链接仍严格校验；发布时的完整集合、允许后缀及实际文件存在性检查不放宽，普通算法与下载也继续严格解析。场景整体与各成员的失败解释不同：正常汇总包括 `ALL_FAILED` 都保存为 Task `SUCCEEDED`，成员错误位于 `result.results`，场景自身错误才为顶层 `FAILED`。整个场景仍受一次任务硬时限约束，未完成的中间成员结果不保存。
+
 新路径只用于新写入。数据库已登记的旧 `storage_key` 继续按根目录边界读取，包括旧输入和制品的 `uploads/<UUID>.bin`、旧结果的 `outputs/<task_id>/<execution_token>/<文件名>`；不解析旧名来授权，不搬迁或重命名存量文件。文件系统与数据库登记失败可能留下孤儿文件，本地存储不扫描或自动清理旧文件、孤儿文件及执行目录。
 
 派发扫描不新增环境变量：每轮最多查询 100 个任务，按主键稳定排序，处理未发布或超过 `INFERENCE_DISPATCH_INTERVAL_SECONDS` 的 `SUBMITTED`，也会重新派发数据库时间判定已过期的 `RUNNING`。Redis 发布失败不更新 `last_dispatched_at`，不消耗执行次数；消息成功但数据库补记失败时允许安全重复派发。
@@ -208,6 +214,45 @@ ppg.active.offline.spo2/1.0.0/spo2-<UUID>.onnx
 ppg.active.offline.spo2/1.0.0/feature_names-<UUID>.json
 ppg.active.offline.spo2/1.0.0/stable_features-<UUID>.json
 ```
+
+### 统一场景真实制品验收记录
+
+2026-11-10 使用独立 PostgreSQL 测试库、每轮唯一 Redis Stream/消费组及临时任务/制品目录，经 Manager HTTP 创建、上传、发布和选择场景，再由普通 `android-cn` HTTP 创建、上传和提交任务，运行实际 `run_inference --once` 消费者。未修改现有业务数据库、模型制品或渠道选择。
+
+PPG 全成功输入来自 `tests/integration/ppg_inputs.py::synthetic_ppg_csv(heart_rate_hz=1.8)`：1800 帧、30 Hz、无额外噪声；部分成功使用同一输入，但在发布后、首次加载前删除该场景版本的 diabetes 制品。另保留 `var/old-assets/sample/20261101_134952-5-2-bp_vlatest-ppg.csv` 的真实部分成功路径；血压使用该 PPG 及同目录的配套 ACC。全失败用例上传只有一帧的 PPG，ACC 仍使用配套样本。
+
+资源来自 `var/old-assets/`：`spo2-latest-spo2.onnx`、`diabetes-latest-diabetes.onnx`、`bp-latest-sbp.joblib`、`bp-latest-dbp.joblib`、`bp-latest-normalize.csv`。血氧的 `spo2-latest-feature_names.npy` 使用 `allow_pickle=False` 转为 JSON；`spo2-latest-stable_features.pkl` 只解析纯字符串列表的 opcode 白名单，不执行 pickle，再转为 JSON。joblib 使用本机已有受信任制品，不推广为可加载不可信文件。
+
+| 资源 | SHA-256 |
+|---|---|
+| sample PPG | `db1d1792be071f9d4285a66e2ba47d1241e25d9150f11409d29777db2606ab46` |
+| sample ACC | `4adfcdb1909830670f73933642ed3642c3bb9e42e17682811bc9592adec68852` |
+| spo2 ONNX | `bd94bb362655355e5dbe79ed963076a27f1524d047d68fd5c4d1ae9702dbbf6e` |
+| feature_names NPY | `29373a98be4fe4c662728b21fbd37987ceb3997adc9052934a6745adad1a7e76` |
+| stable_features PKL | `32a7f019fbb038240964bdd49b1b537055a3939490b7fcaac73c38fb615de726` |
+| diabetes ONNX | `08f7c9bfa8096b1ff1cc1bccb56a9ac07ae8d463df65ca2085e8e77563db49a7` |
+| sbp joblib | `b0484c9f67a32a0fba8e935bc26e4906aba8353dbd13528c1f9c859e2314c32f` |
+| dbp joblib | `f01c425ff041c59de48ff131adf093781da06bb870ad0851451db0628b5fca93` |
+| normalize CSV | `07fb86796b28415996c14413bfcbc0af99700dc8c3d96e9b270a373ed98e10d8` |
+
+| 输入与场景 | 实际 outcome | 实际指标 |
+|---|---|---|
+| 60 秒合成 PPG，完整真实制品 | `ALL_SUCCEEDED` | hr=`108.16986587002928`，br=`12.039611195405097`，spo2=`90.0`，diabetes_probability=`0.1936863660812378` |
+| 同上，diabetes 制品缺失 | `PARTIALLY_SUCCEEDED` | hr、br、spo2 与上一行相同，无 diabetes_probability |
+| sample PPG，完整真实制品 | `PARTIALLY_SUCCEEDED` | spo2=`94.64368438720703`，diabetes_probability=`0.5523077249526978`；HR/BR 按原结果契约拒绝，无 hr/br |
+| 一帧 PPG | `ALL_FAILED` | 无指标 |
+| sample PPG＋ACC，完整真实制品 | `ALL_SUCCEEDED` | sbp=`125.85039300154746`，dbp=`76.03917873786334` |
+| 一帧 PPG＋sample ACC | `ALL_FAILED` | 无指标 |
+
+这六类汇总均保存为 Task `SUCCEEDED`；逐一核对 HTTP 详情、数据库指标、正式目录实际集合和下载字节。各成功成员的完整载荷及文件字节与同输入、同冻结资料、同版本制品的独立计算完全一致；全失败没有正式目录或输出引用。血压资料为提交时冻结的 24 岁、gender=1、170 cm、55 kg。
+
+另在 HR/BR 已生成实际文件、下一成员尚未完成时触发 20 秒整体硬时限，观察到 `FAILED / INFERENCE.EXECUTION_TIMEOUT`；真实完整汇总被损坏后为 `FAILED / RESULT.INVALID_OUTPUT`；真实计算后令牌被替换则拒绝保存、保留 `RUNNING` 和待恢复消息。以上均无权威结果、指标或正式目录。已成功的部分汇总重放只恢复原目录链接，执行次数仍为 1。普通详情、所有已登记文件下载、`/api/v1/docs` 和 `/api/v1/openapi.json` 均实际返回 200。
+
+这些结果只证明编排、数值复用与安全边界，不证明生理或医学准确性。合成输入不是临床样本，`isExample=false` 不改变此限制。
+
+本次定向回归分批通过：场景计算/服务/文件用例 79 项，其余相关算法、存储及工作流用例 344 项，共享安全失败和质量用例 47 项；不是全仓库测试结果。合并收集使用 `--import-mode=importlib`，避免既有不同算法目录中同名测试模块冲突。运行中仍有 SciPy/NumPy/pyPPG 的弃用与数值警告，未为组合场景屏蔽或改变原数值计算。
+
+一次性真实制品验收脚本、独立测试数据库及该验收的 Redis 流已清理；永久行为回归保留在 `tests/unit/inference/scenes/` 与 `tests/integration/workflows/test_scene_*.py`。
 
 ## 安装、迁移与启动
 

@@ -33,12 +33,27 @@ curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/files" \
 
 新输入存储路径按任务创建时间生成，而不是按上传时间：日期目录和文件名前缀使用同一次 `Asia/Shanghai` 转换，格式为 `yyyyMMdd` 和 `yyyyMMdd_HHmmss`。文件名包含 `task_id`、`user_id`、固定算法 key、逻辑名和 UUID；客户端原始文件名不写入路径，只从其最后一个扩展名提取并按算法契约校验。跨日上传仍归入任务创建日期，同名重传使用新 UUID，旧文件继续保留。路径编码、模型制品布局和存量读取规则见[运行环境中的本地文件目录约定](environment.md#新文件目录与命名)。路径字段用于运维辨认归属，不替代数据库权限检查，也不能单独恢复任务的模型参数或资料快照。
 
-最终提交不接收请求体：
+最终提交兼容不带请求体的旧请求：
 
 ```sh
 curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/submit" \
   --header "Authorization: Bearer $ACCESS_TOKEN"
 ```
+
+也可提交可选采集属性，与私有 `clientMetadata` 并列：
+
+```sh
+curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/submit" \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{"measurement":{"captureMethod":"fingertip_chest","captureMode":"active","durationMs":30000},"clientMetadata":{"deviceModel":"Example"}}'
+```
+
+省略 `measurement`、令其为 `null`，或者整个请求体为 `{}`、仅含 `clientMetadata` 均兼容旧提交；无属性时保持未知。非空 `measurement` 必须完整且仅含三项：`captureMethod` 为 `fingertip` 或 `fingertip_chest`，`captureMode` 仅为 `active`，`durationMs` 是 `1` 至 `9223372036854775807` 的严格整数毫秒，拒绝布尔、字符串、小数及越界值。空采集对象、缺字段和额外字段（包括检测时间、账号、渠道、模型与版本）返回 422。自报属性不证明传感器位置或医学有效性。
+
+三项属性与资料快照、私有元数据、首次 `submittedAt` 及状态在原提交事务内原子冻结，错误时一起回滚；重复或并发提交仅一份可接受，其余返回 409。消息补发、租约恢复和结果写入不改属性及提交时间。`submittedAt` 是唯一产品检测时间，用于健康记录归档，而非原生采集窗口起点；上传和提交延迟会改变归档日期，不接受 `capturedAt`。
+
+本人当前渠道任务详情新增 `measurement`，仅返回上述三项原值；旧任务、草稿及未提供属性的任务返回 `null`。示例：`"measurement":{"captureMethod":"fingertip_chest","captureMode":"active","durationMs":30000}`。详情不返回 `clientMetadata` 或完整资料快照；任务列表及提交响应继续使用原摘要，不增加采集字段。
 
 提交返回 HTTP 200 和 `SUBMITTED` 摘要。服务按“渠道 → 当前版本选择 → 任务 → 用户 → 资料”加锁，检查固定版本仍是当前选择、算法要求的每个输入都已选中且实际文件可读，再冻结当前完整资料和提交日期对应的 `age_years`。缺少资料或出生日期时不创建资料记录，年龄保持 `null`；未知病史键继续缺席，不填默认值。提交阶段只验证逻辑文件齐全和可读，不解析 CSV 或提前执行算法资料校验；算法必需资料在消费者运行时依固定版本契约检查。
 

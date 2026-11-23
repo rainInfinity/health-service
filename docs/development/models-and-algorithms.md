@@ -68,6 +68,10 @@
 
 面向用户的错误由服务端按受控原因映射为固定文案，不透传第三方异常正文、原始健康数据或服务器路径。只在算法异常中填写文案不足以保证用户可见，修改错误表达时必须同步更新服务端失败映射。未预期异常仍属于执行错误；质量计算产生无法明确归因的非法值时，不自动补分或推断拒绝原因。
 
+独立算法的输入、质量、执行和结果错误属于任务级失败：任务 `FAILED`、`result=null`，不保存部分指标或权威输出。统一场景则先在成员调用边界处理这些错误，包括成员制品初始化和输出文件错误；失败仅终止该成员，其余成员继续执行。两层均使用计算包 `health_inference.failures` 的同一安全映射，不从异常正文、`safe_message`、堆栈或任意附加属性生成公开信息。
+
+场景成员恰有 `algorithmKey`、`status`、`result`、`failureCode`、`failureMessage`、`qualityFailure` 六个字段。成功成员保留原算法载荷，三个失败字段均为 `null`；失败成员的 `result=null`，只公开受控代码、固定摘要与合法可空质量拒绝。`qualityFailure` 仅为 `{reason, details}`：`LOW_SCORE` 的明细只有实际有限 `score`、`threshold`，`NO_VALID_SIGNAL` 的明细为 `null`。伪造质量码、未知原因或损坏明细降级为安全执行失败，不公开内部 `failureDetail`。最终汇总校验还会再次拒绝伪造文案、额外字段和不一致结局。
+
 ### 依赖、输出与验证
 
 `health-inference` 基础依赖包含 pandas 与 NumPy，SciPy、NeuroKit2 等推理库由可选安装项声明并使用工作区单一锁文件。基础安装中的库仍须惰性导入：算法注册和 Web 启动不得加载 CSV 或计算路径专用库。算法不访问 ORM、HTTP 或实时健康资料，只使用执行输入提供的固定数据。算法只向本次唯一 `output_dir` 写文件，并以 `output_files` 的逻辑名到本地路径返回；服务端验证文件属于当前执行目录后，将不可变实际存储键写入成功结果。成功事务提交后，服务端才把 `<渠道代码>/<任务创建日期>/outputs/<task_id>/` 相对目录链接切换到该执行的完整输出集合。算法不得推导或写入该正式路径；用户下载始终按数据库实际键读取，终态消息或下载请求可幂等恢复链接而不重新运行算法。
@@ -87,6 +91,27 @@
 正式 `ppg_acc.active.offline.bp.v1` 也已注册，使用 `ppg`、`acc` 两个 CSV 输入，不要求健康资料且只接受空参数。版本必须绑定 `sbp`、`dbp` 两个 joblib 模型和 `normalize` CSV；投影指标为 `sbp`／`dbp`、类型 `number`、单位 `mmHg`。该算法由代码定义 `isExample=false`，不提供无修订号别名。实现规则见[PPG+ACC 离线血压 v1](algorithms/ppg-acc-active-offline-bp-v1.md)。
 
 正式 `ppg.active.offline.diabetes.v1` 也已注册，仅要求 `ppg` CSV，不要求健康资料且只接受空参数；每个版本必须绑定单个 `diabetes` ONNX 制品。投影指标为 `diabetes_probability`，类型 `number`、单位 `ratio`；结果还包含未经舍入的 `prob`、按旧 JavaScript 舍入边界生成的 `risk_level` 和实际质量信息。实现及迁移基线见[PPG 主动离线糖尿病风险 v1](algorithms/ppg-active-offline-diabetes-v1.md)。
+
+### 固定统一离线场景
+
+两个场景沿用原模型发布与任务接口，管理配置的名称和完整算法 key 如下；名称保存在 `Model.name`，不是注册表中的额外字段：
+
+| 模型名称 | 算法 key | 固定成员顺序 | 上传输入 | 本场景版本必需制品 |
+|---|---|---|---|---|
+| 统一PPG场景 | `ppg.active.offline.all.v1` | `hr_br` → `spo2` → `diabetes` | `ppg: csv` | `spo2: onnx`、`feature_names: json`、`stable_features: json`、`diabetes: onnx` |
+| 统一PPG+ACC场景 | `ppg_acc.active.offline.all.v1` | `bp` | `ppg: csv`、`acc: csv` | `sbp: joblib`、`dbp: joblib`、`normalize: csv` |
+
+`hr_br`、`spo2`、`diabetes`、`bp` 分别固定引用现有 `ppg.active.offline.hr_br.v1`、`ppg.active.offline.spo2.v1`、`ppg.active.offline.diabetes.v1`、`ppg_acc.active.offline.bp.v1` 的完整运行时。场景不复制计算逻辑、不共享预处理或质量结论，也不重算糖尿病风险分类。`all.v1` 不随新增算法或成员新修订自动扩展；PPG+ACC 场景本次只测血压。
+
+两者均为 `isExample=false`、空参数、无额外必需资料。发布必须绑定完整制品并集、通过原成员的格式规则及物理文件检查；场景指标契约取原成员并集（PPG 为 `hr`、`br`、`spo2`、`diabetes_probability`，PPG+ACC 为 `sbp`、`dbp`），类型和单位不变。仍由版本配置选择投影指标，不新增 `risk_level` 指标。场景的部分成功能力不放宽发布条件，也不代表医学准确性认证。
+
+一个场景任务只固定一个场景发布版本；成员仅使用该版本自己的制品子集，不动态读取独立模型的渠道当前版本。更新制品须发布新场景版本，改变成员或计算解释须新增场景实现修订。成员首次使用时延迟初始化，仅缓存成功准备的版本运行时；初始化失败不在同一任务自动重试，后续任务可以重新准备。每次成员调用使用独立任务输入及输出子目录，不复用上一任务的资料、错误或结果。
+
+每个成员依次执行自己的输入、预处理、质量、推理、后处理和原结果校验。首个质量拒绝只终止当前成员，不阻止其他成员，也不为其补零、补分或保留单项 HR。全部成员正常汇总后任务为 `SUCCEEDED`，结果恰含 `outcome` 和 `results`：测量结局分别为 `ALL_SUCCEEDED`、`PARTIALLY_SUCCEEDED`、`ALL_FAILED`。全部失败仍保留完整安全失败汇总，指标和输出文件为空；任务顶层失败字段及 `qualityFailure` 为空。场景本身的存储、隔离清理或最终汇总错误仍是任务级失败。
+
+所有成员顺序执行，共享既有任务整体硬时限、执行令牌及租约，不增加成员独立超时、并行调度、自动重试或中间检查点。整体超时或失租不能提交已经完成的部分结果。场景不预先采用全部成员的最大输入门槛拒绝整次输入；各成员继续按原规则判断。
+
+物理文件位于本次 `output_dir/<成员名>/`，保留原始文件名和 CSV 表头；成功文件逻辑名统一加成员前缀：PPG 为 `hr_br_processed_ppg`、`hr_br_processed_rsp`、`spo2_processed_ppg`、`diabetes_processed_ppg`，PPG+ACC 为 `bp_processed_ppg`、`bp_processed_scg`。成员载荷本身不含 `output_files`；服务验证后只在场景顶层追加受保护引用。失败成员本次目录必须安全清理，不能证明隔离时整个场景失败；正式发布树只保留成功成员文件，全部失败不发布正式目录。
 
 ### 算法报告质量拒绝
 
@@ -174,6 +199,8 @@ curl --include --request PUT "$API/manager/model-versions/$VERSION_ID/metrics" \
 |`ppg.active.offline.spo2.v1`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`|
 |`ppg_acc.active.offline.bp.v1`|`ppg: csv`、`acc: csv`|`sbp: joblib`、`dbp: joblib`、`normalize: csv`|
 |`ppg.active.offline.diabetes.v1`|`ppg: csv`|`diabetes: onnx`|
+|`ppg.active.offline.all.v1`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`、`diabetes: onnx`|
+|`ppg_acc.active.offline.all.v1`|`ppg: csv`、`acc: csv`|`sbp: joblib`、`dbp: joblib`、`normalize: csv`|
 
 上传端只从客户端文件名提取最后一个后缀并转为小写进行白名单校验；客户端路径、完整文件名和 MIME 不决定存储键。扩展名不证明文件内容有效，CSV 仍由算法解析，ONNX 与 JSON 由版本资源加载器校验；血压版本的 joblib 仅限受信发布，具体信任边界见算法说明。
 

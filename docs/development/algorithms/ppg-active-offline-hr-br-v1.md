@@ -33,7 +33,7 @@
 
 心率估计沿用 NeuroKit2 `ppg_findpeaks` 与 `ppg_rate`，呼吸率估计沿用 `rsp_rate`；两者均使用速率数组的算术均值。传给 NeuroKit2 的采样率为 `int(fs)`，与旧链一致。HR 使用 0.75–4 Hz PPG 波形，BR 使用 0.1–0.5 Hz 呼吸波形。
 
-`build_output.py` 在构造载荷、指标和 CSV 文件前检查原始 HR 与 BR 均为有限数值；任一为 NaN 或正负无穷均以 `RESULT.INVALID_OUTPUT` 失败。通过检查后仅执行 `br = min(br, 18)`：不补值 `12`，不增加 BR 下限，不四舍五入，也不对有限 HR 作额外限幅。PPG v1 不创建 `postprocessing.py`。
+`build_output.py` 在构造载荷、指标和 CSV 文件前检查原始 HR 与 BR 均为有限数值；任一为 NaN 或正负无穷均以 `RESULT.INVALID_OUTPUT` 失败。通过检查后执行 `br = max(8, min(br, 20))`，将呼吸率限制在闭区间 `[8, 20]` 次/分钟；区间内保留原值，不补值 `12`、不四舍五入，也不对有限 HR 作额外限幅。独立 HR/BR 与统一 PPG 场景复用同一规则；健康结果查询只纳入该区间内的呼吸率，历史原始结果不重写。PPG v1 不创建 `postprocessing.py`。
 
 ## 成功结果与处理文件
 

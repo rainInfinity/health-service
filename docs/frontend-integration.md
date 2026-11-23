@@ -18,7 +18,7 @@
 
 `{channel}`、`{task_id}`、`{model_id}` 等是需要替换的路径参数，不是字面字符串。ID 为服务端返回的整数，不能使用示例 ID 假定资源存在。
 
-导入 Apifox 时使用 OpenAPI JSON 地址。Swagger 当前分组为「账号认证」「用户端用户与资料」「用户端模型目录」「用户端推理任务与文件」「管理端模型管理」。认证接口共用渠道参数，管理端登录时将 `channel` 设置为 `manager`。
+导入 Apifox 时使用 OpenAPI JSON 地址。Swagger 当前分组为「账号认证」「用户端用户与资料」「用户端模型目录」「用户端推理任务与文件」「用户端健康记录」「管理端模型管理」。认证接口共用渠道参数，管理端登录时将 `channel` 设置为 `manager`。
 
 ### 1.2 渠道与账号边界
 
@@ -55,7 +55,7 @@ Authorization: Bearer ACCESS_TOKEN
 
 文件上传使用 `multipart/form-data`，字段是 `logicalName` 和 `file`。`logicalName` 必须是当前算法声明的逻辑名；服务端只从 `file` 的文件名提取最后一个后缀，大小写不敏感地校验算法白名单。当前 PPG 输入要求 `.csv`，不支持或缺失后缀返回 `422 INVALID_INPUT`。文件名、路径和 MIME 不代替算法内容校验。浏览器发送 `FormData` 时不要手写 `Content-Type`，由浏览器生成带 boundary 的请求头。
 
-注册、登录、刷新和登出不要求 Access Token；刷新和登出在 JSON 请求体中携带 Refresh Token。最终提交任务、发布版本不需要请求体。
+注册、登录、刷新和登出不要求 Access Token；刷新和登出在 JSON 请求体中携带 Refresh Token。最终提交任务兼容无请求体，也支持第 7.4 节的可选 JSON；发布版本不需要请求体。
 
 请求字段按本文和 OpenAPI 的公开名称发送。未知字段会被拒绝；不要把整份响应对象原样提交给创建或更新接口，也不要自行附加 `userId`、`versionId`、`is_staff` 等非接口字段。
 
@@ -85,7 +85,7 @@ JSON 业务响应统一为：
 
 ### 2.3 分页、空值与命名
 
-模型目录、任务列表和管理端版本列表使用 `offset`、`limit`：
+模型目录、任务列表、健康历史和管理端版本列表使用 `offset`、`limit`：
 
 | 字段 | 约束 |
 |---|---|
@@ -264,11 +264,11 @@ PATCH 请求示例：
 
 目录不返回文件格式、大小上限、必需资料、算法参数、制品要求或完整结果展示定义。具体文件格式和结果解释见第 6 节；不能仅凭逻辑名自动推导任意模型表单。
 
-通用 `isExample` 字段按算法定义显示；若值为 `true`，必须明确标为非临床用途，不能将结果展示为健康结论。正式 PPG v1 返回 `false`。空目录可能是尚未选择发布版本，不应自动回退到其他渠道模型。
+通用 `isExample` 字段按算法定义显示；若值为 `true`，必须明确标为非临床用途，不能将结果展示为健康结论。本文四个独立算法和两个统一场景均返回 `false`；这只表示不是示例执行器，不代表临床认证、医学准确性或诊断许可。空目录可能是尚未选择发布版本，不应自动回退到其他渠道模型。
 
 ## 6. 算法对接
 
-每个算法使用独立条目，以算法名称和完整标识为标题；输入、结果与失败约定按算法分别说明，不将一种算法的契约套用于其他算法。
+每个算法使用独立条目，以算法名称和完整标识为标题；输入、结果与失败约定按算法分别说明。第 6.1–6.4 节保留四个独立算法的调用和历史结果契约；第 6.5–6.6 节是新增场景，不能把单算法结果强制包装成场景结构，也不能把场景当作单算法读取。
 
 ### 6.1 PPG 主动离线 HR/BR v1（`ppg.active.offline.hr_br.v1`）
 
@@ -497,6 +497,258 @@ PPG 使用 `logicalName=ppg`，通道组、单块布局和 `timestampFrame` 规�
 
 质量拒绝和其他失败均为终态。不要展示原始异常、文件路径或私有诊断，也不要把概率或档位转换成血糖值。
 
+### 6.5 统一PPG场景（`ppg.active.offline.all.v1`）
+
+#### 6.5.1 固定成员、输入与版本
+
+| 项目 | 当前契约 |
+|---|---|
+| 模型配置名称 | `统一PPG场景`；前端展示目标渠道目录实际返回的 `modelName` |
+| 算法标识 | `ppg.active.offline.all.v1` |
+| 固定调用顺序 | `hr_br` → `spo2` → `diabetes` |
+| 固定成员标识 | `ppg.active.offline.hr_br.v1`、`ppg.active.offline.spo2.v1`、`ppg.active.offline.diabetes.v1` |
+| 必需输入 | 一份 `ppg` CSV，三个成员读取同一份原始文件；不上传三份副本或其他成员的处理文件 |
+| 固定参数、必需资料 | 参数为 `null` 或空对象，不接受非空参数；无额外必需资料或客户端元数据 |
+| 场景版本制品 | `spo2`（ONNX）、`feature_names`、`stable_features`（JSON）、`diabetes`（ONNX）；普通用户端不上传 |
+| 投影指标 | 成功成员实际产生的 `hr`、`br`、`spo2`、`diabetes_probability` 中，发布版本已选定的项；失败不补零 |
+| `isExample` | `false`，不表示临床认证 |
+
+仍按第 7 节通过目录返回的 `modelId` 创建一个任务、上传、提交并查询，不增加成员列表参数或子任务。`all.v1` 固定上述成员和实现修订，不自动包含未来算法。制品直接属于这个场景发布版本，不动态读取三个独立模型的渠道当前版本；独立模型切换不会改变已固定的场景资源。
+
+PPG CSV 基础规则见第 6.1.2 节。各成员分别执行原输入校验、预处理和质量门禁，不共用一个质量分数，也不因一个成员失败就跳过其他成员。采集若要满足当前成员共同显式下限，可参考 `fs > 8 Hz` 且 `N >= max(450, ceil(15 * fs))`；这不是成功保证，滤波条件、信号质量和模型结果仍由各成员独立判定，不插值、补帧或重采样。
+
+#### 6.5.2 两层状态与成员六字段
+
+查询详情成功仍是 `HTTP 200 / code=OK`。按以下顺序解释详情：
+
+| 层级 | 值与含义 |
+|---|---|
+| 任务 `data.status` | `SUCCEEDED` 只表示全部成员调用和合法汇总完成，**不等于所有测量成功**；`FAILED` 表示场景自身失败 |
+| `data.result.outcome` | 全部成员成功为 `ALL_SUCCEEDED`，部分成功为 `PARTIALLY_SUCCEEDED`，全部成员失败为 `ALL_FAILED` |
+| `data.result.results.<成员>.status` | 只可能是 `SUCCEEDED` 或 `FAILED`；完整汇总总是包含全部固定成员，没有缺项或处理中状态 |
+
+`result.results` 中每个成员恰好包含以下六个字段：
+
+| 字段 | 成功成员 | 失败成员 |
+|---|---|---|
+| `algorithmKey` | 对应成员的完整固定算法标识 | 同左 |
+| `status` | `SUCCEEDED` | `FAILED` |
+| `result` | 对应独立算法的完整计算载荷，不含 `output_files` | `null` |
+| `failureCode` | `null` | 安全失败码，沿用第 7.6 节对应分类 |
+| `failureMessage` | `null` | 固定安全摘要，不是异常正文 |
+| `qualityFailure` | `null` | 仅合法 `INFERENCE.QUALITY_REJECTED` 有值，否则为 `null` |
+
+成员 `qualityFailure` 只有两种公开形式：`{"reason":"LOW_SCORE","details":{"score":61.25,"threshold":70}}` 或 `{"reason":"NO_VALID_SIGNAL","details":null}`。低分时只展示本次实际分数和阈值；无可用信号时不得补造分数。质量拒绝只终止该成员，不代表其他成员通过或失败；没有场景总 `quality`。不解析 `failureMessage` 推断质量原因，也不要求任意 `failureDetail`。
+
+正常汇总时，即使 `outcome=ALL_FAILED`，任务也是 `SUCCEEDED`、`result` 非空，详情顶层 `failureCode`、`failureMessage`、`qualityFailure` 均为 `null`。全部失败没有指标行或输出文件。列表仍只有摘要，不能从列表的 `SUCCEEDED` 判断测量有效，须读取详情。
+
+成功数值必须从成员载荷读取，不能读 `result.hr` 等单算法路径：
+
+| 成员 | 读取路径 | 保留的原结果 |
+|---|---|---|
+| `hr_br` | `result.results.hr_br.result.hr`、`.br` | `hr`、`br`、`quality`，含义沿用第 6.1 节 |
+| `spo2` | `result.results.spo2.result.spo2` | `spo2`、`quality`、`window_predictions`、`window_starts`，沿用第 6.2 节 |
+| `diabetes` | `result.results.diabetes.result.prob`、`.risk_level` | `prob`、`risk_level`、`quality`，沿用第 6.4 节；不重算档位，不转换为血糖 |
+
+读取前先检查该成员 `status=SUCCEEDED`，失败时展示安全失败信息，不显示默认指标，也不保留上次任务的数值。HR/BR 内部仍为原子结果，不能因 HR 可用就展示失败成员的部分 HR。
+
+#### 6.5.3 PPG 部分成功与全部失败示例
+
+以下及第 6.6 节 JSON 展示详情 `data` 中完整的状态、结果和失败字段；模型身份、固定版本及时间等摘要字段仍按第 7.2 节返回，不在示例中重复。数值仅用于说明结构，不是某环境的实测结果；不据此假定任何模型或任务 ID 存在。
+
+部分成功：HR/BR 与血氧成功，糖尿病风险成员质量拒绝。成功成员保留完整原载荷，失败成员不贡献文件或指标：
+
+```json
+{
+  "status": "SUCCEEDED",
+  "result": {
+    "outcome": "PARTIALLY_SUCCEEDED",
+    "results": {
+      "hr_br": {
+        "algorithmKey": "ppg.active.offline.hr_br.v1",
+        "status": "SUCCEEDED",
+        "result": {
+          "hr": 79.0,
+          "br": 15.0,
+          "quality": {"score": 88.5, "threshold": 70}
+        },
+        "failureCode": null,
+        "failureMessage": null,
+        "qualityFailure": null
+      },
+      "spo2": {
+        "algorithmKey": "ppg.active.offline.spo2.v1",
+        "status": "SUCCEEDED",
+        "result": {
+          "spo2": 98.0,
+          "quality": {"score": 88.5, "threshold": 70},
+          "window_predictions": [96.0, 98.0],
+          "window_starts": [0, 75]
+        },
+        "failureCode": null,
+        "failureMessage": null,
+        "qualityFailure": null
+      },
+      "diabetes": {
+        "algorithmKey": "ppg.active.offline.diabetes.v1",
+        "status": "FAILED",
+        "result": null,
+        "failureCode": "INFERENCE.QUALITY_REJECTED",
+        "failureMessage": "信号质量评分未达到要求，请重新采集",
+        "qualityFailure": {
+          "reason": "LOW_SCORE",
+          "details": {"score": 61.25, "threshold": 70}
+        }
+      }
+    },
+    "output_files": {
+      "hr_br_processed_ppg": "<不透明文件引用>",
+      "hr_br_processed_rsp": "<不透明文件引用>",
+      "spo2_processed_ppg": "<不透明文件引用>"
+    }
+  },
+  "failureCode": null,
+  "failureMessage": null,
+  "qualityFailure": null
+}
+```
+
+全部成员失败仍是完整合法汇总；各成员可以有不同失败原因，`output_files` **缺席**，不是 `null` 或带默认引用的对象：
+
+```json
+{
+  "status": "SUCCEEDED",
+  "result": {
+    "outcome": "ALL_FAILED",
+    "results": {
+      "hr_br": {
+        "algorithmKey": "ppg.active.offline.hr_br.v1",
+        "status": "FAILED",
+        "result": null,
+        "failureCode": "INFERENCE.QUALITY_REJECTED",
+        "failureMessage": "未检测到可用信号，请重新采集",
+        "qualityFailure": {"reason": "NO_VALID_SIGNAL", "details": null}
+      },
+      "spo2": {
+        "algorithmKey": "ppg.active.offline.spo2.v1",
+        "status": "FAILED",
+        "result": null,
+        "failureCode": "INFERENCE.INVALID_ARTIFACT",
+        "failureMessage": "模型制品不可用",
+        "qualityFailure": null
+      },
+      "diabetes": {
+        "algorithmKey": "ppg.active.offline.diabetes.v1",
+        "status": "FAILED",
+        "result": null,
+        "failureCode": "INFERENCE.EXECUTION_ERROR",
+        "failureMessage": "推理执行失败",
+        "qualityFailure": null
+      }
+    }
+  },
+  "failureCode": null,
+  "failureMessage": null,
+  "qualityFailure": null
+}
+```
+
+#### 6.5.4 场景输出与场景自身失败
+
+所有文件只登记在场景顶层 `data.result.output_files`，成员的 `result` 内没有 `output_files`。仅成功成员的键出现：
+
+| 场景 | 成员 | 场景顶层下载逻辑名 |
+|---|---|---|
+| 统一PPG场景 | `hr_br` | `hr_br_processed_ppg`、`hr_br_processed_rsp` |
+| 统一PPG场景 | `spo2` | `spo2_processed_ppg` |
+| 统一PPG场景 | `diabetes` | `diabetes_processed_ppg` |
+| 统一PPG+ACC场景 | `bp` | `bp_processed_ppg`、`bp_processed_scg` |
+
+使用对象**键**调用 `GET /api/v1/{channel}/tasks/{task_id}/outputs/{logical_name}/download`，例如 `hr_br_processed_ppg`；字段值仍是不透明引用，不是下载路径或 URL。成员文件保持各独立算法的 CSV 表头、时间轴和数值，不因同为处理后 PPG 就互换。失败成员的键缺席，下载按资源不存在处理；全部失败时整个 `output_files` 缺席且不发布正式结果目录。不要猜测物理目录或回退下载其他成员文件，原账号和来源渠道权限保持不变。
+
+原始输入在服务准备阶段不可读、场景编排/存储错误、整体硬超时或最终汇总契约错误属于任务级失败，而不是 `ALL_FAILED`。整体硬时限覆盖全部成员，无成员自动重试或独立超时；即使部分成员已计算，也不返回中间汇总、部分指标或权威文件。例如整体超时：
+
+```json
+{
+  "status": "FAILED",
+  "result": null,
+  "failureCode": "INFERENCE.EXECUTION_TIMEOUT",
+  "failureMessage": "推理执行超时",
+  "qualityFailure": null
+}
+```
+
+最终汇总无效时同样是 `FAILED / result=null`，失败码为 `RESULT.INVALID_OUTPUT`、安全摘要为“推理结果格式无效”。详情查询仍为 `HTTP 200 / code=OK`。任务级失败按第 7.6 节处理，不将其伪装为已完成的成员失败；需要重做时创建新任务。
+
+### 6.6 统一PPG+ACC场景（`ppg_acc.active.offline.all.v1`）
+
+模型配置名称固定为 `统一PPG+ACC场景`，算法标识为 `ppg_acc.active.offline.all.v1`。本修订**只有 `bp` 成员**（`ppg_acc.active.offline.bp.v1`），不会同时执行 HR/BR、血氧或糖尿病风险。必需输入为 `ppg`、`acc` 两份 CSV，文件格式、时间轴和提交时资料快照规则沿用第 6.3.2 节；无额外必需资料或元数据，参数为 `null` 或空对象，拒绝非空参数。场景发布版本必须绑定完整的 `sbp`、`dbp`（joblib）及 `normalize`（CSV），不动态引用独立血压模型的当前版本。`isExample=false` 不表示临床认证。
+
+两层状态、六字段、安全质量拒绝、顶层输出和场景自身失败均遵循第 6.5 节。因为只有一个成员，正常汇总只会是 `ALL_SUCCEEDED` 或 `ALL_FAILED`，不会是 `PARTIALLY_SUCCEEDED`。
+
+`bp` 成功示例：
+
+```json
+{
+  "status": "SUCCEEDED",
+  "result": {
+    "outcome": "ALL_SUCCEEDED",
+    "results": {
+      "bp": {
+        "algorithmKey": "ppg_acc.active.offline.bp.v1",
+        "status": "SUCCEEDED",
+        "result": {
+          "sbp": 120.25,
+          "dbp": 80.5,
+          "quality": {"score": 88.5, "threshold": 70}
+        },
+        "failureCode": null,
+        "failureMessage": null,
+        "qualityFailure": null
+      }
+    },
+    "output_files": {
+      "bp_processed_ppg": "<不透明文件引用>",
+      "bp_processed_scg": "<不透明文件引用>"
+    }
+  },
+  "failureCode": null,
+  "failureMessage": null,
+  "qualityFailure": null
+}
+```
+
+仅从 `result.results.bp.result.sbp`、`result.results.bp.result.dbp` 读取血压，单位和数值解释沿用第 6.3.3 节；不读取 `result.sbp`。成功且版本选定时投影 `sbp`、`dbp`；下载使用场景顶层 `bp_processed_ppg`、`bp_processed_scg` 键，内容仍为 `timestamp,ppg` 和 `timestamp,scgX,scgY,scgZ` CSV。
+
+`bp` 质量拒绝、但场景正常完成汇总的示例：
+
+```json
+{
+  "status": "SUCCEEDED",
+  "result": {
+    "outcome": "ALL_FAILED",
+    "results": {
+      "bp": {
+        "algorithmKey": "ppg_acc.active.offline.bp.v1",
+        "status": "FAILED",
+        "result": null,
+        "failureCode": "INFERENCE.QUALITY_REJECTED",
+        "failureMessage": "信号质量评分未达到要求，请重新采集",
+        "qualityFailure": {
+          "reason": "LOW_SCORE",
+          "details": {"score": 61.25, "threshold": 70}
+        }
+      }
+    }
+  },
+  "failureCode": null,
+  "failureMessage": null,
+  "qualityFailure": null
+}
+```
+
+此时不展示任何血压值，不保存指标或提供输出文件；不能把任务 `SUCCEEDED` 当成血压测量成功。若为场景整体超时等自身错误，则使用第 6.5.4 节的任务级失败结构，不返回上述 `bp` 汇总。
+
 ## 7. 用户端推理任务与文件
 
 ### 7.1 接口顺序与状态
@@ -516,7 +768,7 @@ PPG 使用 `logicalName=ppg`，通道组、单块布局和 `timestampFrame` 规�
 | `DRAFT` | 草稿，尚未冻结资料 | 上传、同名重传、最终提交 |
 | `SUBMITTED` | 已提交，等待执行 | 查看状态；禁止编辑输入或重复提交 |
 | `RUNNING` | 执行中 | 查看状态；不展示虚构的完成百分比 |
-| `SUCCEEDED` | 成功终态 | 展示详情中的 `result`；有输出文件时提供下载 |
+| `SUCCEEDED` | 处理完成终态 | 展示详情中的 `result`；场景还须读取 `outcome` 和成员 `status`，不代表全部测量成功；有输出文件时提供下载 |
 | `FAILED` | 失败终态 | 展示安全失败摘要；需要重做时创建新草稿 |
 
 通常从草稿进入已提交、执行中，再到成功或失败。草稿也可能因模型切换直接失败；恢复或执行次数耗尽等场景也可产生失败。不要用前端假设的固定状态顺序拒绝服务端返回的终态；查询间隔内可能跳过中间状态。
@@ -591,12 +843,17 @@ file=选中的文件二进制
 
 已提交或终态任务上传返回 409，非法逻辑名、空文件或超过应用大小限制返回 422。代理层拒绝可能不是应用 JSON，应保留非 JSON 错误处理。
 
-### 7.4 最终提交、资料快照与客户端元数据
+### 7.4 最终提交、资料快照与采集属性
 
 最终提交兼容不传请求体的旧客户端。新客户端可提供以下 JSON 请求体：
 
 ```json
 {
+  "measurement": {
+    "captureMethod": "fingertip",
+    "captureMode": "active",
+    "durationMs": 30001
+  },
   "clientMetadata": {
     "deviceModel": "Pixel 9",
     "brand": "Google",
@@ -611,6 +868,10 @@ file=选中的文件二进制
 省略整个请求体、发送 `{}` 或将 `clientMetadata` 设为 `null`，均表示未提供元数据；`clientMetadata: {}` 是有效的空对象。字段必须是 JSON 对象；字符串、数字、数组等非对象值返回 422，任务仍为草稿。
 
 服务端把该对象作为独立任务快照保存，不并入健康资料；元数据用于任务留档和排查，具体算法可按自身契约选择是否消费。缺省元数据不会阻止推理。客户端自报值不能证明设备真实身份；不要提交密码、令牌等敏感信息。普通任务摘要、详情和日志不包含元数据内容，也没有普通用户查询接口。
+
+`measurement` 与私有 `clientMetadata` 独立；可以省略或为 `null`，不提供时保持未知。非空对象必须同时包含三项：`captureMethod` 只允许 `fingertip`、`fingertip_chest`，`captureMode` 只允许 `active`，`durationMs` 是 `1–9223372036854775807` 的严格整数毫秒，拒绝布尔、字符串和小数。空对象、缺字段、额外键或非法值返回 `422 INVALID_INPUT`；不能传入 `capturedAt`、`submittedAt`、账号、渠道、模型或版本覆盖。
+
+三项在同一提交事务中与资料、元数据及首次 `submittedAt` 一起冻结；回滚时全部回滚，重复或并发提交至多一份成功，后续请求返回 409，后台执行不会改写。采集属性是客户端自报记录，不证明设备身份、身体位置或医学有效性；服务端不从算法、输入文件或目标时长补造缺失属性。
 
 服务端检查任务仍是草稿、固定版本仍为渠道当前选择、每个必需输入都已选中且物理文件可读，再冻结当前完整健康资料和提交时计算的年龄。
 
@@ -630,8 +891,9 @@ file=选中的文件二进制
 | `failureCode` | string 或 null | 失败任务的安全业务失败码 |
 | `failureMessage` | string 或 null | 失败摘要，不含内部诊断 |
 | `qualityFailure` | 判别联合对象或 null | 仅合法的质量拒绝失败返回；客户端按 `reason` 识别变体 |
+| `measurement` | object 或 null | 已冻结的 `captureMethod/captureMode/durationMs` 三项；草稿与缺属性的旧任务为 null，摘要和提交响应不含此字段 |
 
-合法质量拒绝仍是 `data.status=FAILED`，详情查询仍返回 HTTP 200 和外层 `code=OK`，`result` 为 `null`。`qualityFailure` 仅在失败状态、错误码 `INFERENCE.QUALITY_REJECTED` 和质量明细均通过校验时有值：
+独立算法的合法质量拒绝仍是 `data.status=FAILED`，详情查询仍返回 HTTP 200 和外层 `code=OK`，`result` 为 `null`。以下规则针对详情顶层 `qualityFailure`：仅在任务失败状态、错误码 `INFERENCE.QUALITY_REJECTED` 和质量明细均通过校验时有值。场景成员的同名字段独立遵循第 6.5.2 节，不因任务 `SUCCEEDED` 被抹去。
 
 以下 JSON 仅展示详情 `data` 中与质量拒绝相关的字段。低分拒绝包含算法本次实际比较的分数和阈值：
 
@@ -659,7 +921,7 @@ file=选中的文件二进制
 }
 ```
 
-成功任务、普通失败以及缺少或损坏的历史明细中，`qualityFailure` 为 `null`。不要解析本地化的 `failureMessage` 来判断原因；响应不会包含私有 `failureDetail`、资料快照、原始诊断或文件路径。读取失败任务本身仍是 `HTTP 200 / code=OK`，失败体现在 `data.status=FAILED`。不要把任务失败与 HTTP 请求失败混为一谈。
+成功任务、普通失败以及缺少或损坏的历史明细中，顶层 `qualityFailure` 为 `null`；场景成功汇总中的失败成员仍可有自己的合法 `qualityFailure`。不要解析本地化的 `failureMessage` 来判断原因；响应不会包含私有 `failureDetail`、资料快照、原始诊断或文件路径。读取失败任务本身仍是 `HTTP 200 / code=OK`，失败体现在 `data.status=FAILED`；场景的成员失败则看 `result.outcome` 和成员 `status`。不要把任务/测量失败与 HTTP 请求失败混为一谈。
 
 **前端建议：**仅对 `SUBMITTED`、`RUNNING` 的详情启动轮询，例如每 2 秒查询一次，前一次完成后再安排下一次，避免请求重叠。进入终态、退出页面或登出时停止；页面恢复时重新查询。此间隔是建议，不是后端规定。当前没有进度百分比、预计完成时间、WebSocket 或 SSE 通知。
 
@@ -684,9 +946,9 @@ file=选中的文件二进制
 | `TASK.EXECUTION_ERROR`、`INFERENCE.EXECUTION_ERROR` | 安全的通用执行失败；保留任务 ID，联系后端 |
 | `INFERENCE.EXECUTION_TIMEOUT` | 推理超过服务端硬时限；显示安全失败文案“推理执行超时”，不要自动重试当前任务；保留任务 ID 并联系后端，重新发起时创建新任务。 |
 
-输入错误只通过 `failureCode=INFERENCE.INVALID_INPUT` 和固定 `failureMessage` 表达，不新增原因字段，也不返回内部 `failureDetail`；各正式 PPG 算法的文件要求和具体提示见第 6.1.2、6.1.4 节及第 6.2.2、6.2.4 节，血压 v1 见第 6.3.2、6.3.4 节。
+输入错误只通过 `failureCode=INFERENCE.INVALID_INPUT` 和固定 `failureMessage` 表达，不新增原因字段，也不返回内部 `failureDetail`；各正式 PPG 算法的文件要求和具体提示见第 6.1.2、6.1.4 节及第 6.2.2、6.2.4 节，血压 v1 见第 6.3.2、6.3.4 节，糖尿病风险 v1 见第 6.4.2、6.4.4 节。
 
-质量拒绝使用 `INFERENCE.QUALITY_REJECTED`，详情只在白名单校验通过时提供 `qualityFailure`。结果契约错误使用 `RESULT.INVALID_OUTPUT` 和固定文案“推理结果格式无效”，不作为输入问题或质量拒绝呈现。以上失败任务均为 `data.status=FAILED` 且 `result=null`；只有质量拒绝可以有 `qualityFailure`。优先展示安全 `failureMessage`，未知失败码使用通用提示；算法专属处理见第 6 节对应算法小节。
+任务级质量拒绝使用 `INFERENCE.QUALITY_REJECTED`，详情顶层只在白名单校验通过时提供 `qualityFailure`。结果契约错误使用 `RESULT.INVALID_OUTPUT` 和固定文案“推理结果格式无效”，不作为输入问题或质量拒绝呈现。以上**任务级**失败均为 `data.status=FAILED` 且 `result=null`；只有质量拒绝可以有顶层 `qualityFailure`。相同安全分类用于场景成员时，失败留在对应成员内，正常汇总的任务仍是 `SUCCEEDED`，详见第 6.5–6.6 节。优先展示安全 `failureMessage`，未知失败码使用通用提示。
 
 不要要求服务端返回堆栈或原始健康数据帮助定位。
 
@@ -694,11 +956,65 @@ file=选中的文件二进制
 
 输入下载使用上传返回的 `fileId`，可下载当前或历史输入。输出下载仅适用于 `SUCCEEDED`，从 `result.output_files` 取得逻辑名作为路径参数；该对象可能缺席。
 
-`output_files` 的值是服务端保存的不透明文件标识，不是公开 URL；不要展示、解析、拼接服务器路径或作为请求参数。前端只使用键构造输出下载接口，并对逻辑名做 URL 路径编码。HR/BR v1、SPO2 v1 和血压 v1 的输出逻辑名分别见第 6.1.3、6.2.3、6.3.3 节。成功事务后的正式链接发布可能滞后；服务端仍以数据库登记的实际键提供下载并幂等恢复，不要由前端访问目录或重新推理。
+`output_files` 的值是服务端保存的不透明文件标识，不是公开 URL；不要展示、解析、拼接服务器路径或作为请求参数。前端只使用键构造输出下载接口，并对逻辑名做 URL 路径编码。四个独立算法的输出逻辑名分别见第 6.1.3、6.2.3、6.3.3、6.4.3 节；场景使用第 6.5.4 节带成员前缀的键，仍只从顶层 `result.output_files` 读取。成功事务后的正式链接发布可能滞后；服务端仍以数据库登记的实际键提供下载并幂等恢复，不要由前端访问目录或重新推理。
 
 下载仍需 `Authorization`，普通 `<a href>` 无法自行添加该请求头。浏览器建议使用带鉴权的 fetch 或 HTTP 客户端请求：先检查 HTTP 状态，失败时尝试读取 JSON 错误，成功后再转 Blob 并触发保存，使用后释放 Object URL。不要将令牌加进下载 URL。
 
 服务端返回 `application/octet-stream` 和附件响应头，不保证文件名包含原扩展名；若需要友好名称，由前端依据算法约定确定。任务不属于账号或来源渠道、未知文件、未登记输出、输出尚未成功或物理文件缺失，均返回安全 404；令牌与路径渠道不匹配返回 403。
+
+### 7.8 最新健康结果与指标历史
+
+两个接口复用普通渠道 Bearer 认证、JSON 封套与 `requestId`，同时限定当前账号和令牌匹配的来源渠道。未认证返回 401，令牌与路径渠道不匹配返回 403；同账号在其他渠道的记录也不参与计数或最新选择。
+
+| 方法与路径 | 参数 | data |
+|---|---|---|
+| `GET /api/v1/{channel}/measurements/latest` | 无 | 固定 `bloodPressure/heartRate/respirationRate/oxygenSaturation/diabetesRisk` 五键，各为一条记录或 null |
+| `GET /api/v1/{channel}/measurements` | 必填 `metric/from/to`；可选 `offset/limit` | `items/total/offset/limit` |
+
+历史示例：`GET /api/v1/android-cn/measurements?metric=heartRate&from=2026-11-01&to=2026-11-22&offset=0&limit=20`。`from/to` 严格采用北京时间 `YYYY-MM-DD`，包含首尾日，以服务端保存的提交时刻筛选；分页默认 0/20，limit 为 1–100，不额外限制日期区间天数。缺参数、未知指标、非法日期、反向区间和越界分页返回 `422 INVALID_INPUT`。无结果或偏移越界仍返回 200、空 `items` 和整个筛选范围的有效 `total`。
+
+**产品检测时间统一为 `submittedAt`**：服务端最终接受提交的冻结时刻，不是原生正式采集窗口起点，也不是 `finishedAt` 或 `createdAt`。上传或提交延迟会改变归档日期；此口径替代前端建议中按 `capturedAt` 归档的方案，本接口不新增该字段。响应沿用北京时间秒级格式；内部按完整时间精度、任务 ID 稳定倒序，完成顺序不影响最新选择。
+
+统一记录示例（心率）：
+
+```json
+{
+  "recordId": "101:heartRate",
+  "taskId": 101,
+  "metric": "heartRate",
+  "submittedAt": "2026-11-22 08:30:00",
+  "captureMethod": "fingertip",
+  "captureMode": "active",
+  "durationMs": 30001,
+  "readings": [{"code": "hr", "value": 79, "unit": "beats_per_minute"}],
+  "quality": {"score": 88.65866718458382, "threshold": 70},
+  "riskLevel": null,
+  "modelId": 7,
+  "versionId": 12,
+  "version": "1.0.0",
+  "algorithmKey": "ppg.active.offline.hr_br.v1"
+}
+```
+
+| metric | readings code / unit | 来源 |
+|---|---|---|
+| `bloodPressure` | `sbp`、`dbp` / `mmHg`，同一任务成对 | `ppg_acc.active.offline.bp.v1` 或场景 `bp` 成员 |
+| `heartRate` | `hr` / `beats_per_minute` | `ppg.active.offline.hr_br.v1` 或场景 `hr_br` 成员 |
+| `respirationRate` | `br` / `breaths_per_minute` | 同上，与心率共享该次实际质量 |
+| `oxygenSaturation` | `spo2` / `percent` | `ppg.active.offline.spo2.v1` 或场景 `spo2` 成员 |
+| `diabetesRisk` | `diabetes_probability` / `ratio`，取原 `prob` | `ppg.active.offline.diabetes.v1` 或场景 `diabetes` 成员 |
+
+`recordId` 为 `<taskId>:<metric>`，同任务的不同指标身份不同。`modelId/versionId/version` 来自任务固定版本；场景时为场景版本，`algorithmKey` 为实际成功成员算法，不是成员独立模型发布版本，也不随渠道当前选择变化。读数原值不舍入、限幅或重新分级；`quality` 仅保留实际合法 `score/threshold`，缺失或非法为 null。风险的 `riskLevel` 保留原 `risk_level` 的 0/1/2 编码，其余指标为 null；概率不是血糖值或临床患病概率解释。
+
+仅正式独立算法和两个已支持场景的有效成功结果参与查询。任务未成功、场景成员失败、`ALL_FAILED`、示例和未知算法不生成记录，血压缺一项不跨任务拼接；每个指标独立回退到此前最新有效结果。已保存 `submittedAt` 的旧任务即使没有可选指标投影，也从权威 `result` 返回有效读数；旧采集属性均为 null，不回填、不重跑、不改原结果或投影集合。完整报告与波形继续通过关联任务及受权文件接口读取；健康记录不公开资料、私有元数据、内部诊断、原始数据或本地路径。
+
+**分页消费边界：**这是普通 offset 分页，不返回快照、游标、聚合、趋势或评估结果；total 和页面读取当前数据，不保证 SQL 之间或跨请求集合不变。列表可先显示，但必须成功加载整个筛选区间后才能展示最终均值、极值或趋势。任一页失败应显示未完成并允许重试，不能当空页结束。
+
+已知测量完成产生新有效结果、发现 total 变化或重复 `recordId` 时，丢弃该轮所有已取页面，整段重取，不能只刷新第一页或混用旧页。切换账号、渠道、指标和日期后隔离缓存与请求，迟到响应不得写入新区间。去重不是完整性保证，接口无法自动检测全部并发变化。
+
+未经确认可比性时，按采集方式、采集来源、实际成员算法及固定 `versionId` 保守分组；缺失来源保持未知，不自动与明确来源合并。同名指标不代表跨来源或版本可直接求均值。风险档位不求均值，也不因返回概率就默认开放风险趋势。
+
+SDK 和前端仍需在各自仓库接入 DTO、串联提交及查询、完整区间加载和整段刷新；本后端变更不代表这些客户端已完成接入，也不代表联调环境模型、制品和消费者已部署。未新增记录详情、固定快照、历史聚合或医学评估端点。
 
 ## 8. 管理端模型管理
 
@@ -726,7 +1042,9 @@ file=选中的文件二进制
 
 ### 8.2 算法、参数和制品
 
-`algorithmKey` 指向后端代码显式注册的执行器，不能用任意字符串上传算法代码。正式 `ppg.active.offline.hr_br.v1` 要求单块 `ppg`、空参数、无制品和无健康资料，并声明 `hr`、`br` 指标；正式 `ppg.active.offline.spo2.v1` 要求单块 `ppg`、空参数、三个模型制品、无健康资料，并声明 `spo2` 指标；正式 `ppg_acc.active.offline.bp.v1` 要求 `ppg` 与 `acc`、空参数、`sbp`/`dbp`/`normalize` 三个版本制品，并声明 `sbp`、`dbp` 指标，不强制要求资料字段。三者均由代码定义 `isExample=false`，计算结果均不构成医学准确性认证。未注册或已移除的标识不能创建、发布或执行；不提供无修订号别名。
+`algorithmKey` 指向后端代码显式注册的执行器，不能用任意字符串上传算法代码。正式 `ppg.active.offline.hr_br.v1` 要求 `ppg`、空参数、无制品和无必需健康资料，并声明 `hr`、`br` 指标；正式 `ppg.active.offline.spo2.v1` 要求 `ppg`、空参数、`spo2`、`feature_names`、`stable_features` 三个模型制品、无必需健康资料，并声明 `spo2` 指标；正式 `ppg_acc.active.offline.bp.v1` 要求 `ppg` 与 `acc`、空参数、`sbp`/`dbp`/`normalize` 三个版本制品，并声明 `sbp`、`dbp` 指标，不强制要求资料字段；正式 `ppg.active.offline.diabetes.v1` 要求 `ppg`、空参数、一个 `diabetes` ONNX 制品、无必需健康资料，并声明 `diabetes_probability`（`number`、`ratio`）指标。四者均由代码定义 `isExample=false`，计算结果均不构成医学准确性认证。未注册或已移除的标识不能创建、发布或执行；不提供无修订号别名。
+
+两个场景为独立的新模型配置，不替换上述四个算法：`统一PPG场景` 使用 `ppg.active.offline.all.v1`、一份 `ppg` 输入及 `spo2`/`feature_names`/`stable_features`/`diabetes` 完整制品；`统一PPG+ACC场景` 使用 `ppg_acc.active.offline.all.v1`、`ppg`/`acc` 输入及 `sbp`/`dbp`/`normalize` 完整制品。两者均使用空参数、无额外必需资料、`isExample=false`；不得以部分成功能力放宽发布完整性。配置和隔离联调发布步骤见[初始数据库数据维护](development/initial-database-data.md#统一场景的隔离联调发布与选择)，不代表任何环境已经发布，也不自动切换旧模型渠道配置。
 
 创建版本请求：
 
@@ -744,7 +1062,7 @@ PATCH 仅可修改未发布版本的算法标识和参数，不用于修改版�
 
 制品按算法要求的逻辑名上传，非空且受部署上传上限约束。同版本同逻辑名重复登记返回冲突，不能将任务输入的「同名重传自动选择」规则套用到模型制品。发布时制品逻辑名集合必须与算法声明完全一致，不能随意增加附件。
 
-正式 HR/BR v1 与 SPO2 v1 均不接受非空参数，也不要求健康资料；HR/BR v1 不需要制品，SPO2 v1 必须绑定 `spo2`、`feature_names`、`stable_features` 三个制品；血压 v1 必须绑定 `sbp`、`dbp`（joblib）和 `normalize`（CSV），缺少必要资料不阻止执行，资料映射沿用冻结快照及旧版缺失解释。发布时按算法契约设置完整制品集合；其他算法的参数和制品要求以其注册契约为准。当前没有算法注册表查询接口供前端动态生成管理表单。
+正式 HR/BR v1 与 SPO2 v1 均不接受非空参数，也不要求健康资料；HR/BR v1 不需要制品，SPO2 v1 必须绑定 `spo2`、`feature_names`、`stable_features` 三个制品；血压 v1 必须绑定 `sbp`、`dbp`（joblib）和 `normalize`（CSV），缺少必要资料不阻止执行，资料映射沿用冻结快照及旧版缺失解释；糖尿病风险 v1 不接受非空参数、不要求健康资料，必须绑定唯一的 `diabetes` ONNX 制品。发布时按算法契约设置完整制品集合；其他算法的参数和制品要求以其注册契约为准。当前没有算法注册表查询接口供前端动态生成管理表单。
 
 ### 8.3 指标配置
 
@@ -770,6 +1088,12 @@ SPO2 v1 声明一个指标：
 | `sbp` | `number` | `mmHg` | 收缩压 |
 | `dbp` | `number` | `mmHg` | 舒张压 |
 
+糖尿病风险 v1 声明一个指标：
+
+| `code` | `valueType` | `unit` | 含义 |
+|---|---|---|---|
+| `diabetes_probability` | `number` | `ratio` | 糖尿病模型类别 1 的原始概率；不是血糖值或诊断结论 |
+
 创建全局指标时，分别为目标算法创建所需指标；若指标代码已存在，先确认其类型和单位一致，不要把冲突响应当作创建成功。
 
 版本指标配置请求：
@@ -780,7 +1104,7 @@ SPO2 v1 声明一个指标：
 }
 ```
 
-以上 `metricCodes` 示例对应 HR/BR；SPO2 v1 应配置完整集合 `{"metricCodes":["spo2"]}`，不能把不同算法的指标混合到同一版本。
+以上 `metricCodes` 示例对应 HR/BR；SPO2 v1、血压 v1、糖尿病风险 v1 分别配置完整集合 `{"metricCodes":["spo2"]}`、`{"metricCodes":["sbp","dbp"]}`、`{"metricCodes":["diabetes_probability"]}`。统一PPG场景可配置 `{"metricCodes":["hr","br","spo2","diabetes_probability"]}`，统一PPG+ACC场景可配置 `{"metricCodes":["sbp","dbp"]}`；只允许该算法声明的指标集合，不新增 `risk_level` 指标，也不把无关指标混入版本。
 
 PUT 是替换完整投影集合，不是追加；空数组表示清空，重复代码、未知代码或不匹配的算法语义返回 422。并非必须选择算法的全部指标，投影集合也不决定详情 `result` 的完整内容。
 
@@ -812,9 +1136,9 @@ PUT 是替换完整投影集合，不是追加；空数组表示清空，重复�
 
 联调前确认 Web API 可访问。要验证任务执行结果，后端还需启动独立推理消费者，并确保数据库、Redis 和文件存储可用；只启动 Web 可以提交和查询任务，但不能证明推理会完成。前端无需迁移数据库或创建初始模型。环境操作见[本地开发指南](development/environment.md#独立推理消费者运行与部署)。
 
-仓库不提供可直接上传的短 PPG 样例，联调方需自备符合第 6.1.2 节要求的 CSV；滤波及输入校验细节见[PPG 主动离线 HR/BR v1](development/algorithms/ppg-active-offline-hr-br-v1.md)。
+仓库不提供可直接上传的短 PPG 样例，联调方需自备符合第 6.1.2 节要求的 CSV；滤波及输入校验细节见[PPG 主动离线 HR/BR v1](development/algorithms/ppg-active-offline-hr-br-v1.md)。血压 v1 与糖尿病风险 v1 的算法专属限制分别见[血压算法说明](development/algorithms/ppg-acc-active-offline-bp-v1.md)和[糖尿病风险算法说明](development/algorithms/ppg-active-offline-diabetes-v1.md)。
 
-正式 v1 不要求健康资料、模型参数或权重制品；本算法的输入和结果契约见第 6.1 节。
+HR/BR v1 不要求健康资料、模型参数或权重制品；本节完整调用示例及该算法的输入、结果契约见第 6.1 节。其他算法按第 6 节各自契约准备输入和版本配置。
 
 ### 9.2 用户端完成一次任务
 
@@ -865,7 +1189,7 @@ curl --include --request POST "$BASE_URL/api/v1/$CHANNEL/tasks/$TASK_ID/files" \
 - [ ] 身高、体重按字符串响应处理；时间不因浏览器或宿主机时区被错误转换。
 - [ ] 用户目录只展示本渠道可用版本，并按通用 `isExample` 字段标注用途；空目录不回退到其他渠道。
 - [ ] 草稿能上传和同名重传，保存不同 `fileId`；旧输入仍可下载。
-- [ ] 缺少算法必需输入时提交失败；符合所选算法对应章节（HR/BR 为 6.1.2，SPO2 为 6.2.2）条件的 CSV 能执行成功并返回对应结果字段。
+- [ ] 缺少所选算法必需输入时提交失败；对通过质量门禁的有效样本，按各自算法章节核对成功结果和输出：HR/BR 为第 6.1.2、6.1.3 节，SPO2 为第 6.2.2、6.2.3 节，血压须上传 `ppg` 与 `acc` 并核对 `sbp`、`dbp`（第 6.3.2、6.3.3 节），糖尿病风险核对 `prob`、`risk_level`（第 6.4.2、6.4.3 节）。
 - [ ] 非法 CSV 可上传和提交，但执行后失败；界面区分 API 成功与任务失败。
 - [ ] 重复提交及提交后上传被拒绝；超时不盲目创建或提交重复任务。
 - [ ] 修改实时资料不会改变已提交任务；补全资料后通过新任务重新提交。
@@ -874,6 +1198,10 @@ curl --include --request POST "$BASE_URL/api/v1/$CHANNEL/tasks/$TASK_ID/files" \
 - [ ] 查询进入成功或失败终态后停止；等待过久不自行改判失败。
 - [ ] 管理端能发布示例并配置渠道；发布后配置不能修改，重复发布不改变首次发布时间。
 - [ ] 切换到不同版本会使旧草稿失败，已提交及运行任务仍使用原版本；回退不复活旧草稿。
+- [ ] 统一PPG场景分别覆盖全部成功、部分成功和全部失败；即使任务 `SUCCEEDED`，也按 `outcome` 和各成员 `status` 展示，并从 `result.results.<成员>.result` 读取原载荷。
+- [ ] 统一PPG+ACC场景只包含 `bp`；成功为 `ALL_SUCCEEDED`，成员失败为 `ALL_FAILED`，没有 `PARTIALLY_SUCCEEDED`；场景整体超时则为 `FAILED / result=null`，没有中间汇总。
+- [ ] 场景顶层失败字段在正常汇总时为空，成员质量拒绝仍可读取；只下载顶层 `result.output_files` 中已登记的带前缀逻辑名，全部失败时没有此对象。
+- [ ] 场景只在隔离联调环境按实际返回 ID 配置，不自动取消或切换旧渠道选择；四个独立算法历史结果仍按原字段及无前缀逻辑名读取。
 
 ### 10.2 常见问题
 
@@ -883,10 +1211,10 @@ curl --include --request POST "$BASE_URL/api/v1/$CHANNEL/tasks/$TASK_ID/files" \
 | 同一账号换端后找不到任务 | 核对令牌渠道、URL 渠道、任务来源渠道；账号相同不代表跨渠道可读 |
 | 多个请求同时认证失败后被迫登录 | 核对是否重复使用同一 Refresh，是否原子替换令牌对，是否存在旧刷新响应覆盖新会话 |
 | 提交成功但一直等待 | 确认消费者及依赖运行，由后端排查；不重复提交来催执行 |
-| HTTP 200 但任务失败 | 查看 `data.status`、`failureCode`、`failureMessage`，外层 `code` 仅表示查询成功 |
+| HTTP 200 但任务或测量失败 | 外层 `code` 仅表示查询成功；任务失败看 `data.status` 和顶层安全失败字段，场景 `SUCCEEDED` 还须看 `result.outcome` 与成员状态 |
 | 刷新页面后上传列表消失 | 当前没有服务端输入列表接口，详情也没有输入集合；不要伪造服务端恢复结果 |
 | 模型已发布但用户看不到 | 检查目标普通渠道是否选择了该版本，并使用目标渠道令牌查询 |
-| 成功任务没有输出下载入口 | 检查是否存在 `result.output_files`；输出逻辑名分别见第 6.1.3、6.2.3 节，其他算法遵循自身契约 |
+| 成功任务没有输出下载入口 | 检查是否存在顶层 `result.output_files`；独立算法见第 6.1.3–6.4.3 节，场景见第 6.5.4 节；`ALL_FAILED` 没有输出对象，不能猜测文件或改用其他成员输出 |
 | 时间显示偏移八小时 | 检查是否把无后缀北京时间当成 UTC，或使用浏览器隐式解析 |
 | 422 没有具体字段错误 | 当前只返回统一安全错误；前端本地校验并结合当前操作提示，附 `requestId` 联调 |
 
