@@ -1,13 +1,11 @@
-"""验证 HR/BR v1 实际评分、固定阈值和非法质量结果。"""
+"""验证独立 HR 与 BR 共用的实际评分、固定阈值和非法质量结果。"""
 
 import math
 
 import pytest
 from health_inference import QualityRejectedError
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
-    preprocess_ppg,
-)
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.quality import (
+from health_inference.utils.ppg_preprocessing import preprocess_ppg
+from health_inference.utils.ppg_quality import (
     QUALITY_THRESHOLD,
     PPGQualityResult,
     PPGQualityStrategy,

@@ -1,4 +1,4 @@
-"""验证 HR/BR v1 单块 PPG 输入格式和受控错误原因。"""
+"""验证独立 HR 与 BR 共用的单块 PPG 输入格式和受控错误原因。"""
 
 from pathlib import Path
 

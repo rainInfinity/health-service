@@ -1,13 +1,11 @@
-"""验证 HR/BR v1 信号提取、滤波、标准化和处理边界。"""
+"""验证独立 HR 与 BR 共用的信号提取、滤波、标准化和处理边界。"""
 
 import math
 from typing import Literal
 
 import numpy as np
 import pytest
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
-    preprocess_ppg,
-)
+from health_inference.utils.ppg_preprocessing import preprocess_ppg
 from health_inference.exceptions import InputError, InputErrorReason
 from health_inference.utils.ppg_input import PPGInput
 
