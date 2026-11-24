@@ -9,12 +9,12 @@
 | 传感器集合 | 算法使用的传感器或信号类型；多个类型按约定顺序连接。 | `ppg`、`rppg`、`ppg_acc` |
 | 采集模式 | 测量数据的采集方式。 | `active`、`passive` |
 | 处理模式 | 对数据执行推理的方式。 | `offline`、`realtime` |
-| 输出 | 算法输出的业务指标类别。 | `hr`、`hr_br`、`spo2`、`bp`、`diabetes` |
+| 输出 | 算法输出的业务指标类别。 | `hr`、`br`、`spo2`、`bp`、`diabetes`、`all` |
 | 实现修订号 | 固定一份可执行实现及其规则，区别于模型发布版本号。 | `v1`、`v2` |
 
 示例：
 
-- `ppg.active.offline.hr_br.v1`：主动采集 PPG，离线输出心率和呼吸率的第一个实现修订。
+- `ppg.active.offline.hr.v1`、`ppg.active.offline.br.v1`：主动采集 PPG，分别离线输出心率、呼吸率的第一个独立实现修订。
 - `ppg.active.offline.spo2.v1`：主动采集 PPG，离线输出血氧的第一个实现修订。
 - `rppg.passive.offline.hr.v1`：被动采集 rPPG，离线输出心率的第一个实现修订。
 - `rppg.active.realtime.hr.v1`：主动采集 rPPG，实时输出心率的第一个实现修订。
@@ -23,13 +23,13 @@
 
 `ppg_acc` 表示 PPG 与加速度传感器组合；若算法从原始加速度推导 SCG，`requiredInputs` 应声明实际上传的加速度文件，而不是把它称为 SCG 文件。算法标识描述算法契约，不替代 `requiredInputs`、结果字段或单位声明。`active`／`passive` 表示采集模式；`offline`／`realtime` 表示处理模式。示例只规定命名，不表示相应执行器已经实现或注册。实时标识只有在执行运行时支持实时输入和结果返回时才能用于可执行版本；当前文件上传任务流程是离线处理。
 
-算法标识指向代码中显式注册的稳定执行契约。实现目录使用完整标识的下划线形式，例如 `ppg_active_offline_hr_br_v1/`；不同修订平级放置，不再嵌套 `v1/`，也不注册无修订号或 `latest` 别名。未在当前代码注册的历史或测试标识不能用于新版本。
+算法标识指向代码中显式注册的稳定执行契约。实现目录使用完整标识的下划线形式，例如 `ppg_active_offline_hr_v1/`；不同修订平级放置，不再嵌套 `v1/`，也不注册无修订号或 `latest` 别名。未在当前代码注册的历史或测试标识不能用于新版本。旧融合 `ppg.active.offline.hr_br.v1` 与旧 PPG 场景 `ppg.active.offline.all.v1` 最终退役，不保留兼容别名；PPG+ACC 场景 `.all.v1` 与血压 `.bp.v1` 不变。
 
 算法实现修订与模型发布版本相互独立：模型发布版本固定引用完整算法标识、参数、制品和投影指标，任务再固定引用该模型版本。仅调整已声明参数值或制品、且解释方式不变时，可创建引用同一实现的新模型版本；预处理、质量判定、推理或后处理行为改变且需保留旧行为时，应增加实现修订，不能覆盖旧标识。输出类别仍须在算法契约中定义具体结果字段、类型和单位。
 
 ## 正式离线算法开发规范
 
-统一离线流水线、策略接口及正式 HR/BR、SPO2 v1 执行器均已实现；两者分别按自己的 PPG、质量和结果契约执行，计算结果均不代表医学准确性认证。实时算法不强行套用离线流水线。
+正式离线算法遵循统一流水线和策略接口。独立 HR、BR 与 SPO2 v1 分别按自己的结果契约执行；计算成功不代表医学准确性认证，实时算法不强行套用离线流水线。新增 HR、BR 的验证与部署状态须以实际执行记录为准。
 
 ### 执行模板与策略
 
@@ -54,7 +54,7 @@
 | `build_output.py` | 构建最终载荷、指标和处理文件，并校验最终结果。 |
 | `postprocessing.py` | 仅在该修订需要独立后处理策略时采用；与输出构造紧密耦合的规则可在 `build_output.py` 中、写文件前处理。 |
 
-数据结构就近定义，使用明确类型传递阶段数据，不恢复不断写入通用字典的旧阶段容器。质量检测和推理复用同一份预处理结果；质量检测不原地修改后续推理使用的信号。PPG v1 将跨算法共用的 CSV 校验集中在 `health_inference/utils/ppg_input.py`；算法额外输入边界留在各自 `load_input.py`。只把真实共用职责放入按领域命名的工具模块，不为假想复用建立笼统工具层。共同计算逻辑仅在存在真实复用时按职责提取。
+数据结构就近定义，使用明确类型传递阶段数据，不恢复不断写入通用字典的旧阶段容器。质量检测和推理复用本次预处理结果，质量检测不原地修改信号。PPG CSV 校验集中在 `utils/ppg_input.py`；独立 HR、BR 同源复用 `utils/ppg_preprocessing.py`、`utils/ppg_quality.py`、`utils/ppg_output.py` 的前置与文件写入，不复制实现，不跨任务或场景成员共享本次评分和波形。其他算法额外边界留在各自实现中，只抽取真实共用职责。
 
 ### 版本与任务状态隔离
 
@@ -84,9 +84,9 @@
 
 管理目录路由为：`POST /manager/models`；`GET`／`POST /manager/models/{model_id}/versions`；`PATCH /manager/model-versions/{version_id}`；`POST /manager/model-versions/{version_id}/artifacts`；`POST /manager/metrics`；`PUT /manager/model-versions/{version_id}/metrics`；`POST /manager/model-versions/{version_id}/publish`；`PUT /manager/channels/{channel}/models/{model_id}/selection`。普通查询为 `GET /{channel}/models`。
 
-正式 `ppg.active.offline.hr_br.v1` 已注册，可用空参数、零制品和零健康资料发布；输入逻辑名为 `ppg`，投影指标使用 `hr`／`br` 及其固定单位。实现规则见[PPG 主动离线 HR/BR v1](algorithms/ppg-active-offline-hr-br-v1.md)。
+独立 `ppg.active.offline.hr.v1` 与 `ppg.active.offline.br.v1` 使用空参数、零制品、零必需健康资料，输入均为 `ppg` CSV。HR 只返回 `hr/quality`、只投影 `hr`／`beats_per_minute`、只输出 `processed_ppg`；BR 只返回 `br/quality`、只投影 `br`／`breaths_per_minute`、只输出 `processed_rsp`。BR 在确认原始值有限后限制到 `[8,20]`，NaN 失败不造数；两者均不允许 nullable 指标或内部 `failures`。规则见[HR v1](algorithms/ppg-active-offline-hr-v1.md)、[BR v1](algorithms/ppg-active-offline-br-v1.md)。
 
-正式 `ppg.active.offline.spo2.v1` 也已注册，要求 `ppg` 输入、空参数及 `spo2`、`feature_names`、`stable_features` 三个模型制品，投影指标为 `spo2`／`percent`，不要求健康资料。实现规则见[PPG 主动离线血氧 v1](algorithms/ppg-active-offline-spo2-v1.md)。HR/BR 与血氧算法均由代码定义 `isExample=false`，不提供无修订号别名。
+正式 `ppg.active.offline.spo2.v1` 要求 `ppg` 输入、空参数及 `spo2`、`feature_names`、`stable_features` 三个模型制品，投影指标为 `spo2`／`percent`，不要求健康资料。实现规则见[PPG 主动离线血氧 v1](algorithms/ppg-active-offline-spo2-v1.md)。HR、BR 与血氧算法均由代码定义 `isExample=false`，不提供无修订号别名。
 
 正式 `ppg_acc.active.offline.bp.v1` 也已注册，使用 `ppg`、`acc` 两个 CSV 输入，不要求健康资料且只接受空参数。版本必须绑定 `sbp`、`dbp` 两个 joblib 模型和 `normalize` CSV；投影指标为 `sbp`／`dbp`、类型 `number`、单位 `mmHg`。该算法由代码定义 `isExample=false`，不提供无修订号别名。实现规则见[PPG+ACC 离线血压 v1](algorithms/ppg-acc-active-offline-bp-v1.md)。
 
@@ -98,20 +98,20 @@
 
 | 模型名称 | 算法 key | 固定成员顺序 | 上传输入 | 本场景版本必需制品 |
 |---|---|---|---|---|
-| 统一PPG场景 | `ppg.active.offline.all.v1` | `hr_br` → `spo2` → `diabetes` | `ppg: csv` | `spo2: onnx`、`feature_names: json`、`stable_features: json`、`diabetes: onnx` |
+| 统一PPG场景 | `ppg.active.offline.all.v2` | `hr` → `br` → `spo2` → `diabetes` | `ppg: csv` | `spo2: onnx`、`feature_names: json`、`stable_features: json`、`diabetes: onnx` |
 | 统一PPG+ACC场景 | `ppg_acc.active.offline.all.v1` | `bp` | `ppg: csv`、`acc: csv` | `sbp: joblib`、`dbp: joblib`、`normalize: csv` |
 
-`hr_br`、`spo2`、`diabetes`、`bp` 分别固定引用现有 `ppg.active.offline.hr_br.v1`、`ppg.active.offline.spo2.v1`、`ppg.active.offline.diabetes.v1`、`ppg_acc.active.offline.bp.v1` 的完整运行时。场景不复制计算逻辑、不共享预处理或质量结论，也不重算糖尿病风险分类。`all.v1` 不随新增算法或成员新修订自动扩展；PPG+ACC 场景本次只测血压。
+`hr`、`br`、`spo2`、`diabetes`、`bp` 分别固定引用 `ppg.active.offline.hr.v1`、`ppg.active.offline.br.v1`、`ppg.active.offline.spo2.v1`、`ppg.active.offline.diabetes.v1`、`ppg_acc.active.offline.bp.v1` 的完整运行时。HR、BR 的同源前置复用共享模块，但各成员独立执行质量和推理，不共享本次质量结论，也不重算糖尿病风险分类。两个场景不随新增算法或成员新修订自动扩展；PPG+ACC 场景只测血压。
 
 两者均为 `isExample=false`、空参数、无额外必需资料。发布必须绑定完整制品并集、通过原成员的格式规则及物理文件检查；场景指标契约取原成员并集（PPG 为 `hr`、`br`、`spo2`、`diabetes_probability`，PPG+ACC 为 `sbp`、`dbp`），类型和单位不变。仍由版本配置选择投影指标，不新增 `risk_level` 指标。场景的部分成功能力不放宽发布条件，也不代表医学准确性认证。
 
 一个场景任务只固定一个场景发布版本；成员仅使用该版本自己的制品子集，不动态读取独立模型的渠道当前版本。更新制品须发布新场景版本，改变成员或计算解释须新增场景实现修订。成员首次使用时延迟初始化，仅缓存成功准备的版本运行时；初始化失败不在同一任务自动重试，后续任务可以重新准备。每次成员调用使用独立任务输入及输出子目录，不复用上一任务的资料、错误或结果。
 
-每个成员依次执行自己的输入、预处理、质量、推理、后处理和原结果校验。首个质量拒绝只终止当前成员，不阻止其他成员，也不为其补零、补分或保留单项 HR。全部成员正常汇总后任务为 `SUCCEEDED`，结果恰含 `outcome` 和 `results`：测量结局分别为 `ALL_SUCCEEDED`、`PARTIALLY_SUCCEEDED`、`ALL_FAILED`。全部失败仍保留完整安全失败汇总，指标和输出文件为空；任务顶层失败字段及 `qualityFailure` 为空。场景本身的存储、隔离清理或最终汇总错误仍是任务级失败。
+每个成员依次执行自己的输入、预处理、质量、推理、后处理和结果校验。首个质量拒绝只终止当前成员，不阻止其他成员，不补零或补分；BR 失败不影响已成功 HR。正常汇总后任务为 `SUCCEEDED`，载荷恰含 `outcome/results`，每成员只有 `SUCCEEDED/FAILED`。PPG 按四成员成功数判定：4 为 `ALL_SUCCEEDED`、1–3 为 `PARTIALLY_SUCCEEDED`、0 为 `ALL_FAILED`。全失败仍保留安全汇总，指标和文件为空，顶层失败字段及 `qualityFailure` 为空；场景存储、隔离清理或汇总错误仍是任务级失败。读数路径分别为 `results.hr.result.hr`、`results.br.result.br`。
 
 所有成员顺序执行，共享既有任务整体硬时限、执行令牌及租约，不增加成员独立超时、并行调度、自动重试或中间检查点。整体超时或失租不能提交已经完成的部分结果。场景不预先采用全部成员的最大输入门槛拒绝整次输入；各成员继续按原规则判断。
 
-物理文件位于本次 `output_dir/<成员名>/`，保留原始文件名和 CSV 表头；成功文件逻辑名统一加成员前缀：PPG 为 `hr_br_processed_ppg`、`hr_br_processed_rsp`、`spo2_processed_ppg`、`diabetes_processed_ppg`，PPG+ACC 为 `bp_processed_ppg`、`bp_processed_scg`。成员载荷本身不含 `output_files`；服务验证后只在场景顶层追加受保护引用。失败成员本次目录必须安全清理，不能证明隔离时整个场景失败；正式发布树只保留成功成员文件，全部失败不发布正式目录。
+物理文件位于本次 `output_dir/<成员名>/`，保留原始文件名和 CSV 表头；成功文件逻辑名统一加成员前缀：PPG 为 `hr_processed_ppg`、`br_processed_rsp`、`spo2_processed_ppg`、`diabetes_processed_ppg`，PPG+ACC 为 `bp_processed_ppg`、`bp_processed_scg`。成员载荷本身不含 `output_files`；服务验证后只在场景顶层追加受保护引用。失败成员本次目录必须安全清理，不能证明隔离时整个场景失败；正式发布树只保留成功成员文件，全部失败不发布正式目录。
 
 ### 算法报告质量拒绝
 
@@ -155,9 +155,9 @@ curl --include --request POST "$API/manager/models" \
   --header "Authorization: Bearer $MANAGER_ACCESS" \
   --header 'Content-Type: application/json' \
   --data '{
-    "code": "ppg.active.offline.hr_br",
-    "name": "HR/BR v1",
-    "description": "使用主动采集的 PPG 信号离线测量心率（HR）和呼吸率（BR），返回两项数值、信号质量评分及处理后的 PPG 与呼吸波（RSP）文件；计算结果不构成医学诊断。"
+    "code": "ppg.active.offline.hr",
+    "name": "HR v1",
+    "description": "使用主动采集的 PPG 独立测量心率，返回 HR、实际质量和处理后 PPG；结果不构成医学诊断。"
   }'
 ```
 
@@ -168,7 +168,7 @@ export MODEL_ID='<创建模型返回的 data.modelId>'
 curl --include --request POST "$API/manager/models/$MODEL_ID/versions" \
   --header "Authorization: Bearer $MANAGER_ACCESS" \
   --header 'Content-Type: application/json' \
-  --data '{"version":"1.0.0","algorithmKey":"ppg.active.offline.hr_br.v1","params":null}'
+  --data '{"version":"1.0.0","algorithmKey":"ppg.active.offline.hr.v1","params":null}'
 ```
 
 创建与算法类型、单位完全一致的指标，再用指标代码设置版本完整投影集合：
@@ -179,27 +179,29 @@ curl --include --request POST "$API/manager/metrics" \
   --header "Authorization: Bearer $MANAGER_ACCESS" \
   --header 'Content-Type: application/json' \
   --data '{"code":"hr","description":"心率","valueType":"number","unit":"beats_per_minute"}'
-curl --include --request POST "$API/manager/metrics" \
-  --header "Authorization: Bearer $MANAGER_ACCESS" \
-  --header 'Content-Type: application/json' \
-  --data '{"code":"br","description":"呼吸率","valueType":"number","unit":"breaths_per_minute"}'
+```
+
+BR 使用独立模型 `ppg.active.offline.br`、版本 `1.0.0` 和算法 `ppg.active.offline.br.v1`，指标定义为 `br/number/breaths_per_minute`，版本只绑定 `["br"]`。以下 HR 版本只绑定 `["hr"]`；已有指标仅在核对类型与单位后复用。
+
+```sh
 curl --include --request PUT "$API/manager/model-versions/$VERSION_ID/metrics" \
   --header "Authorization: Bearer $MANAGER_ACCESS" \
   --header 'Content-Type: application/json' \
-  --data '{"metricCodes":["hr","br"]}'
+  --data '{"metricCodes":["hr"]}'
 ```
 
-发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且物理文件存在，以及所有已选指标的代码、值类型和单位。HR/BR v1 不需要模型制品；SPO2 v1 必须上传 `spo2`、`feature_names` 和 `stable_features`；血压 v1 必须上传 `sbp`、`dbp` 和 `normalize`；糖尿病 v1 必须上传 `diabetes` ONNX；其他算法按各自注册契约处理。发布成功后算法、参数、制品和指标集合不可原地修改；重复发布返回原发布时间。
+发布会校验算法已注册、固定参数有效、制品逻辑名与算法声明完全一致且物理文件存在，以及所有已选指标的代码、值类型和单位。独立 HR、BR v1 不需要制品；SPO2 v1 必须上传 `spo2`、`feature_names` 和 `stable_features`；血压 v1 必须上传 `sbp`、`dbp` 和 `normalize`；糖尿病 v1 必须上传 `diabetes` ONNX；其他算法按各自契约处理。发布后算法、参数、制品和指标不可原地修改；重复发布返回原发布时间。
 
 算法通过 `input_extensions` 与 `artifact_extensions` 为每个逻辑名声明允许的后缀集合；映射键必须分别与 `required_inputs`、`required_artifacts` 完全一致。后缀使用不带点号的小写扩展名，并在注册时校验。当前正式契约如下：
 
 |算法|输入后缀|制品后缀|
 |---|---|---|
-|`ppg.active.offline.hr_br.v1`|`ppg: csv`|无|
+|`ppg.active.offline.hr.v1`|`ppg: csv`|无|
+|`ppg.active.offline.br.v1`|`ppg: csv`|无|
 |`ppg.active.offline.spo2.v1`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`|
 |`ppg_acc.active.offline.bp.v1`|`ppg: csv`、`acc: csv`|`sbp: joblib`、`dbp: joblib`、`normalize: csv`|
 |`ppg.active.offline.diabetes.v1`|`ppg: csv`|`diabetes: onnx`|
-|`ppg.active.offline.all.v1`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`、`diabetes: onnx`|
+|`ppg.active.offline.all.v2`|`ppg: csv`|`spo2: onnx`、`feature_names: json`、`stable_features: json`、`diabetes: onnx`|
 |`ppg_acc.active.offline.all.v1`|`ppg: csv`、`acc: csv`|`sbp: joblib`、`dbp: joblib`、`normalize: csv`|
 
 上传端只从客户端文件名提取最后一个后缀并转为小写进行白名单校验；客户端路径、完整文件名和 MIME 不决定存储键。扩展名不证明文件内容有效，CSV 仍由算法解析，ONNX 与 JSON 由版本资源加载器校验；血压版本的 joblib 仅限受信发布，具体信任边界见算法说明。
@@ -231,6 +233,8 @@ curl --include --request PUT "$API/manager/channels/ios-cn/models/$MODEL_ID/sele
 ```
 
 每个已知渠道独立选择本模型的一个已发布版本。同版本重选不改变草稿；切换版本会在同一事务中将该渠道旧版本全部 `DRAFT` 任务标为 `FAILED`／`TASK.MODEL_SWITCHED`，已提交或运行中的任务继续使用固定版本。回退不会恢复已失败草稿。
+
+本次目录目标为新增 `ppg.active.offline.hr`、`ppg.active.offline.br` 各 `1.0.0`，保留 `ppg.active.offline.all` 模型并新增 `2.0.0` 绑定 `.all.v2`，三者均选择到五普通渠道 `android-cn/android-intl/ios-cn/ios-intl/wxapp`；旧融合模型及旧 PPG 场景 v1 发布版本最终退役。退役前应先完成新实现对照验证、按授权清理测试环境全部推理历史及依赖，再处理旧版本与渠道引用，不能用兼容别名兜底。此处为操作要求，不是已执行记录；详见[目录清单](initial-database-data.md)。
 
 普通渠道使用与路径匹配的 Access 查询自己已选的目录：
 

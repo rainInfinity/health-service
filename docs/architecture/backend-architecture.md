@@ -65,9 +65,11 @@ uv sync --locked --package health-inference --no-dev
 
 `health_inference` 通过代码显式注册的稳定 `algorithm_key` 提供可执行定义及参数、结果校验；数据库只保存算法标识和版本参数，不增加 `input_spec` 字段，也不允许从数据库动态导入类路径。`health_service.infrastructure.inference_adapter` 将固定版本、选中文件和提交快照转换为纯计算输入，不让算法访问 ORM、HTTP 或实时资料。
 
-正式算法 `ppg.active.offline.hr_br.v1` 接受单块 `ppg` 输入并返回 HR、BR 与实际质量分数；无必需制品或健康资料，固定参数必须为空，指标单位分别为 `beats_per_minute` 和 `breaths_per_minute`。正式算法 `ppg.active.offline.spo2.v1` 同样接受单块 `ppg` 且无健康资料，固定参数为空，要求三个模型制品并投影 `spo2`／`percent`。通用 `isExample` 字段由算法定义决定，模型名称和客户端参数不能改变该身份；两项正式 PPG v1 均返回 `false`。
+独立 `ppg.active.offline.hr.v1`、`ppg.active.offline.br.v1` 接受单块 `ppg` CSV、空参数、零制品、零必需资料。HR 仅返回 `hr/quality` 及 `processed_ppg`，BR 仅返回 `br/quality` 及 `processed_rsp`，单位分别为 `beats_per_minute/breaths_per_minute`。两者同源复用 `utils/ppg_input.py`、`ppg_preprocessing.py`、`ppg_quality.py`、`ppg_output.py`，质量阈值为 `70`，但独立执行速率估计。BR 先拒绝非有限值再限制到 `[8,20]`，不造数；单算法不支持 nullable 指标或内部部分失败。SPO2 v1 输入和三制品规则不变。正式算法 `isExample=false` 不代表医学认证。
 
-两个固定场景 `ppg.active.offline.all.v1`（统一PPG场景）与 `ppg_acc.active.offline.all.v1`（统一PPG+ACC场景）仍使用一个 Task、一个场景 ModelVersion 和一次原始输入上传。前者按固定顺序调用 HR/BR、血氧、糖尿病风险的完整运行时，后者只调用血压；`all.v1` 不随注册表自动扩展。场景发布版本直接固定全部成员制品，成员不查询独立模型的渠道指针，也不共享预处理或质量结论。部署只增加代码定义及按授权配置的模型目录，不新增表、迁移、环境变量或成员队列，不自动切换既有渠道。
+固定场景 `ppg.active.offline.all.v2` 使用一个 Task、一个场景版本及一份 PPG，固定按 `hr→br→spo2→diabetes` 执行完整成员链；PPG+ACC `.all.v1` 仍仅调用血压。场景版本绑定全部制品，不查询独立模型渠道指针，不跨成员共享本次质量结论。HR、BR 各自为 `SUCCEEDED/FAILED`，BR 失败不抹去 HR；按四成员成功数计算 outcome，读数路径为 `results.hr.result.hr/results.br.result.br`，文件为 `hr_processed_ppg/br_processed_rsp`。
+
+目录目标为新模型 `ppg.active.offline.hr/br` 各 `1.0.0`，既有 `ppg.active.offline.all` 新版本 `2.0.0` 绑定 `.all.v2`，均选择到五普通渠道。先对照验证，之后按授权清理测试环境全部推理历史及依赖，再退役旧融合实现与旧 PPG 场景 v1 代码、版本及引用，不保留别名；PPG+ACC 和 BP 不变。不新增表、迁移、环境变量或成员队列；此处不是部署或验证完成记录。
 
 ## 六大渠道与 API
 
@@ -75,7 +77,7 @@ uv sync --locked --package health-inference --no-dev
 
 新 API 建议采用 `/api/v1/<channel>/...`。路由指定预期渠道，认证得到的渠道必须与之匹配；同一行为复用 HTTP handler、Schema 和应用用例，确有差异时才增加渠道专用适配。`manager` 除渠道识别外，还必须校验登录人员的管理权限。渠道标识或移动端内置密钥不能代替用户身份认证与任务归属校验。
 
-API 版本决定 HTTP 请求和响应契约；移动 App 发布版本、模型版本和渠道 label 分别管理。模型目录在 `manager` 权限下创建模型和未发布版本；只有代码显式注册的算法可发布，发布事务在版本行锁内校验固定参数、与算法声明完全一致且物理文件存在的制品集合，以及代码、值类型和单位都匹配的投影指标。正式 HR/BR v1 可在空制品、空参数及匹配 HR/BR 指标契约时发布；正式 SPO2 v1 需绑定 `spo2`、`feature_names`、`stable_features` 并匹配 `spo2`／`percent` 指标。版本发布后执行配置不可原地修改，重复发布不改变首次发布时间。
+API 版本、移动 App 版本、模型版本和渠道分别管理。管理发布在版本行锁内校验注册算法、固定参数、完整且存在的制品、匹配代码/类型/单位的指标。独立 HR、BR v1 可用空制品和参数分别发布各自指标；SPO2 v1 仍须绑定三制品与 `spo2/percent`。发布后执行配置不可原地修改，重复发布不改变首次时间。
 
 每个已知渠道独立选择一个属于目标模型的已发布版本。选择事务依次锁渠道行、选择行和旧版本 `DRAFT` 任务行，并原子更新选择、终止旧草稿；同版本重选不改任务，已提交或运行中的任务继续使用固定版本，回退不会复活已失败草稿。普通渠道目录只返回自身当前发布版本、所需输入逻辑名和 `isExample`，不暴露参数或文件路径。
 
@@ -127,11 +129,11 @@ Web 使用 ASGI、Django Ninja Extra 的异步控制器，并避免在事件循�
 
 ## 健康记录查询边界
 
-健康记录是 Task 权威 `result_payload` 的只读视图，不新增第二套健康结果真值。`domain/measurements.py` 显式定义五类指标的算法、固定场景成员、结果路径和原始单位；同一映射驱动持久化过滤与标量提取，避免准入条件和返回读数漂移。仅识别四个正式独立算法及两个固定场景，未知或示例算法被排除，不通过动态注册项推断历史合同。
+健康记录是 Task 权威 `result_payload` 的只读视图，不新增第二套真值。`domain/measurements.py` 显式定义五类指标的算法、场景成员、结果路径和单位，同一映射驱动查询过滤与标量提取。识别五个正式独立算法及 PPG v2、PPG+ACC v1 场景；HR 绑定 `.hr.v1` 或场景 `hr`，BR 绑定 `.br.v1` 或场景 `br`，不再要求同成同败。旧融合及 PPG v1 不在现行健康映射中。
 
 `infrastructure/persistence/measurements.py` 同时按账号、来源渠道、任务成功状态和非空提交时间收窄。场景还须满足合法成功汇总结局、对应成员成功及实际算法身份匹配；`ALL_FAILED` 不产生健康记录。PostgreSQL 在类型保护的 CASE 内转换数值，并在 count、offset/limit 之前检查所需读数：血压两项必须同任务成对，风险必须具有合法概率与原整数档位。分页只选择公开读数、质量、冻结采集属性和固定版本等标量，不加载完整结果、波形、私有快照或逐条任务详情。
 
-`schemas/internal/measurements.py` 向应用层返回已求值的不可变记录。记录身份为 `<taskId>:<metric>`，场景记录的版本仍来自任务固定的场景版本，实际算法来源为成功成员。读数与风险编码保留原值，不舍入、不重新分级；质量仅公开对应成功结果的合法实际 `score/threshold`，缺失或非法时为 null，HR/BR 共用同一次质量。
+`schemas/internal/measurements.py` 返回已求值不可变记录，身份为 `<taskId>:<metric>`。场景版本来自任务，实际算法来源为对应成功成员。读数和风险编码保留原值，不舍入或重分级；质量仅公开该项实际成功结果合法的 `score/threshold`，缺失或非法为 null。HR、BR 各读自身质量与状态，不因另一项失败而排除有效记录。
 
 健康查询不依赖可选 `TaskMetric`，历史版本只投影部分指标或没有投影仍可产生完整健康记录；查询不补写投影、不改写原结果，也不重跑算法或检查原波形是否仍在。旧任务缺少采集属性时保持未知，不从算法和文件推导。缺少 `submitted_at` 则不参与查询，不回退到创建或完成时间。
 
@@ -184,7 +186,7 @@ Web 在任务数据库事务提交后发布仅包含任务标识的消息，不�
 
 以下内容不属于当前变更已确定的实现范围：
 
-- 正式 HR/BR v1 的独立医学准确性验证；当前实现迁移旧数值链并通过合成信号行为验证，不构成医学准确性认证。
+- 独立 HR、BR v1 的医学准确性验证；旧融合迁移及合成信号验收不能作为新实现通过或临床认证的证据。
 - 任务取消、草稿过期、历史健康数据删除与文件自动清理。
 - 多进程扩容、请求合批、正式模型资源加载策略，以及 Redis 高可用。
 - 各渠道客户端的密钥保管政策和是否立即撤销 Access Token。

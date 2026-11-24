@@ -127,7 +127,7 @@ var/
         └── ...
 ```
 
-任务输入的渠道目录使用固定渠道代码，不在文件名中重复渠道。`<YYYYMMDD>` 与文件名前缀 `<YYYYMMDD_HHmmss>` 均从任务创建时间转换到 `Asia/Shanghai` 后生成，格式分别为 `yyyyMMdd` 与 `yyyyMMdd_HHmmss`；上传跨日时仍使用任务创建日期。输入文件名依次携带任务 ID、用户 ID、算法 key、逻辑名和 32 位小写十六进制 UUID，客户端原始文件名不进入存储路径。示例：`ios-cn/20261101/20261101_003045-42-7-ppg.active.offline.hr_br.v1-ppg-<UUID>.csv`。
+任务输入渠道目录使用固定渠道代码。日期与文件时间前缀取任务创建时间并转换到 `Asia/Shanghai`，跨日上传仍用创建日期。文件名携带任务 ID、用户 ID、完整算法 key、逻辑名及 32 位小写十六进制 UUID，不使用客户端原名。例如 `ios-cn/20261101/20261101_003045-42-7-ppg.active.offline.hr.v1-ppg-<UUID>.csv`。
 
 模型制品路径按稳定 `model_code`、版本号和逻辑名分层；例如 `spo2` ONNX 制品使用 `<model_code>/<version>/spo2-<UUID>.onnx`，`feature_names` 与 `stable_features` 清单使用 `.json`，UUID 同样为 32 位小写十六进制。输入和制品的扩展名从上传文件名提取、转为小写并按算法契约校验；逻辑名与扩展名是独立字段，扩展名不代替内容校验。
 
@@ -135,9 +135,9 @@ var/
 
 正式结果入口是 `<渠道代码>/<任务创建日期>/outputs/<task_id>/`，由服务端管理的相对目录符号链接指向同一任务根目录内已成功执行的 `.executions/<task_id>/<execution_token>/`。目录整组切换，保留算法原文件名，例如 `ppg-processed.csv`；算法只写本次 `output_dir`，不得写入或推导正式目录。执行临时文件不进入正式结果目录。
 
-固定场景沿用同一目录链接发布机制：统一PPG场景的执行目录包含 `hr_br/ppg-processed.csv`、`hr_br/rsp-processed.csv`、`spo2/ppg-processed.csv`、`diabetes/ppg-processed.csv`；统一PPG+ACC场景只有 `bp/ppg-processed.csv`、`bp/scg-processed.csv`。正式入口保留这些成员子目录，例如 `ios-cn/<YYYYMMDD>/outputs/<task_id>/spo2/ppg-processed.csv`。结果登记逻辑名分别为 `hr_br_processed_ppg`、`hr_br_processed_rsp`、`spo2_processed_ppg`、`diabetes_processed_ppg` 或 `bp_processed_ppg`、`bp_processed_scg`。各文件保留原算法表头和字节，不复制到扁平目录；失败成员的本次子目录必须安全清理后才允许整组发布，全部成员失败不创建正式目录。
+固定场景沿用整组链接发布。PPG v2 成功成员目录分别为 `hr/ppg-processed.csv`、`br/rsp-processed.csv`、`spo2/ppg-processed.csv`、`diabetes/ppg-processed.csv`，下载逻辑名为 `hr_processed_ppg`、`br_processed_rsp`、`spo2_processed_ppg`、`diabetes_processed_ppg`。PPG+ACC 仍为 `bp/ppg-processed.csv`、`bp/scg-processed.csv` 及 `bp_processed_ppg/bp_processed_scg`。保留成员子目录与原表头、时间轴；失败目录安全清理后才整组发布，全失败无正式目录。
 
-场景配置仅通过现有管理流程在隔离联调环境进行：名称为“统一PPG场景”及“统一PPG+ACC场景”，算法 key 分别为 `ppg.active.offline.all.v1`、`ppg_acc.active.offline.all.v1`，参数为空，完整制品清单见[模型与算法开发](models-and-algorithms.md)。一个场景发布版本直接固定全部成员制品，创建任务须使用当前渠道模型目录实际返回的 ID；不动态引用独立模型渠道版本。此变更无需新增配置、依赖或数据库迁移，不自动发布生产制品或切换原渠道；`isExample=false` 不代表临床认证。
+统一 PPG 使用 `ppg.active.offline.all.v2`、模型 `ppg.active.offline.all` 新版本 `2.0.0`，依次调用 `hr→br→spo2→diabetes`；PPG+ACC `ppg_acc.active.offline.all.v1` 不变。新独立 HR、BR 模型分别为 `ppg.active.offline.hr/br`，各 `1.0.0`，三个新发布版本均投放五普通渠道。先验证新算法与旧融合对照，再按授权清测试环境全部推理历史、退役旧融合及旧 PPG 场景 v1，不保留别名。管理步骤和完整制品见[模型开发](models-and-algorithms.md)及[目录清单](initial-database-data.md)。无新增环境变量或数据库迁移；本文不是已执行记录，不自动授权生产操作。
 
 执行时只有这两个固定场景允许安全解析尚未实际加载的候选制品路径，最终文件缺失、类型错误或模型损坏在成员初始化边界处理。根目录、登记键和现有符号链接仍严格校验；发布时的完整集合、允许后缀及实际文件存在性检查不放宽，普通算法与下载也继续严格解析。场景整体与各成员的失败解释不同：正常汇总包括 `ALL_FAILED` 都保存为 Task `SUCCEEDED`，成员错误位于 `result.results`，场景自身错误才为顶层 `FAILED`。整个场景仍受一次任务硬时限约束，未完成的中间成员结果不保存。
 
@@ -181,6 +181,8 @@ uv run --locked --all-packages pytest --reuse-db --create-db
 
 ### 文件路径与结果发布验收记录
 
+以下是旧融合 HR/BR 与当时存储实现的历史验收，不是独立 HR/BR v1 或 PPG 场景 v2 的新验证记录；其中命令与测试路径仅保留为历史上下文，不应直接当作现行回归清单。
+
 该命令使用 `--reuse-db` 保留 pytest 测试库；存储集成场景使用临时目录，消费者测试使用独立命名的 Redis Stream：
 
 ```sh
@@ -216,6 +218,8 @@ ppg.active.offline.spo2/1.0.0/stable_features-<UUID>.json
 ```
 
 ### 统一场景真实制品验收记录
+
+以下为 2026-11-10 的旧 PPG 场景 v1（三成员）及 PPG+ACC v1 历史验收。PPG v2 已拆为四成员，以下数值、通过项数、版本与文件结构不能证明新版本已验证或已部署，BR 失败同拖 HR 的旧观察也不是新契约。
 
 2026-11-10 使用独立 PostgreSQL 测试库、每轮唯一 Redis Stream/消费组及临时任务/制品目录，经 Manager HTTP 创建、上传、发布和选择场景，再由普通 `android-cn` HTTP 创建、上传和提交任务，运行实际 `run_inference --once` 消费者。未修改现有业务数据库、模型制品或渠道选择。
 
@@ -308,4 +312,17 @@ LOG_DIR=logs/inference uv run --locked --package health-service python manage.py
 | `inference.worker.error` | 数据库或 Redis 基础设施故障，不等同于算法失败。 |
 
 任务事件可用 `consumer`、`taskId`、`messageId` 关联，`durationMs` 为单调时钟耗时，不因时间展示到秒而丢失毫秒精度。重复终态消息或有效租约占用不会制造新的开始事件；成功终态重放会基于数据库权威结果幂等恢复正式链接后确认，不重新计算。确认失败发生在成功事件之后时，以数据库成功状态为准；不能把基础设施错误当作业务失败。受限字段不含原始异常正文、堆栈、SQL、输入输出或执行令牌。
+
+
+### 独立 HR/BR 拆分验收记录（2026-11-24）
+
+主流程已完成三组新独立算法与旧融合实现的真实数值、质量及波形文件逐字节对照。原任务 14 的输入得到 HR `77.90509214733797`，BR 单独失败而前置通过，说明该输入下 HR 可以独立保留；这不是医学准确性认证，也不是最终回归通过声明。
+
+经本次授权，主库已清理 15 个推理任务、20 条输入记录、38 条指标投影，以及任务存储根目录全部文件和推理 Stream；仅移除旧融合及旧 PPG v1 模型版本、其四个制品副本，其他 20 条渠道选择保留。旧融合、旧 PPG all.v1 源码及旧融合算法文档已移除，不保留别名；历史验收内容和 OpenSpec 归档材料不改写成新结果。
+
+独立 HR、BR 已分别发布 `1.0.0`，模型及版本 ID 分别为 `7/7`、`8/8`；统一 PPG 模型 ID `5` 新增 `2.0.0`，版本 ID `9` 绑定 `ppg.active.offline.all.v2`。三项均已选择到 `android-cn`、`android-intl`、`ios-cn`、`ios-intl`、`wxapp`，逐渠道认证查询确认目录含七个模型；其余二十条渠道选择保持不变。
+
+使用原任务 14 输入，经真实 HTTP 创建、上传、提交和常驻消费者执行：独立 HR 成功且为 `77.90509214733797`，独立 BR 失败；统一 PPG v2 为 `PARTIALLY_SUCCEEDED`，`hr`、`spo2`、`diabetes` 成功而 `br` 单独失败。数据库仅投影实际成功指标；心率最新和历史查询正常，呼吸率无伪造记录；独立及场景的 PPG 下载字节一致，失败 BR 下载及跨渠道下载均返回 404。三条验收任务、输入、输出和已确认消息随后按本次 ID 清理，未清理并发用户数据；验收结束时主库推理任务数为零，临时原始输入副本已释放。
+
+独立 HR、BR 及公共输入、预处理和质量门禁的定向回归共 `89 passed`；其余迁移后的注册、场景、目录、消费者、健康查询和下载回归共 `508 passed`，两组共 `597 passed`，均使用 `--reuse-db --import-mode=importlib`。更新后的十四份主规格全部通过校验。运行中仍有 SciPy/NumPy/pyPPG 的弃用及数值精度警告，未屏蔽或据此改变计算。这些结果只验证实现一致性、失败隔离和接口流程，不构成医学准确性认证。
 

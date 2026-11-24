@@ -4,7 +4,7 @@
 
 ## 算法注册与数据库目录
 
-算法执行器由 `health-inference` 代码显式注册，不存在独立的算法数据库表。四个独立正式算法为 `ppg.active.offline.hr_br.v1`、`ppg.active.offline.spo2.v1`、`ppg_acc.active.offline.bp.v1` 和 `ppg.active.offline.diabetes.v1`；新增两个固定场景为 `ppg.active.offline.all.v1` 和 `ppg_acc.active.offline.all.v1`。下文保留四个独立模型的初始配置，并另列场景的隔离联调配置流程，不自动替代现有模型或渠道选择。每个版本只有在部署环境提供并核验相应模型制品后才能发布。`var/old-assets/` 中的本机测试或迁移候选制品不作为生产初始数据。数据库中的 `ModelVersion.algorithm_key` 引用完整算法标识；未在当前部署代码注册的算法不能提前写入模型目录或发布。
+算法执行器由 `health-inference` 显式注册，不存在独立算法数据库表。现行独立算法为 `ppg.active.offline.hr.v1`、`ppg.active.offline.br.v1`、`ppg.active.offline.spo2.v1`、`ppg_acc.active.offline.bp.v1`、`ppg.active.offline.diabetes.v1`；固定场景为 `ppg.active.offline.all.v2` 和 `ppg_acc.active.offline.all.v1`。数据库版本引用完整算法标识，当前部署未注册的 key 不能发布。每个版本需核验真实制品；`var/old-assets/` 本机候选制品不构成生产初始数据。本文是目标配置与操作流程，不是已部署、已发布或验证通过记录。
 
 渠道、模型、模型版本、指标定义、版本指标关系及渠道选择分别保存在 `health_channel`、`health_model`、`health_model_version`、`health_metric_definition`、`health_model_version_metric` 和 `health_channel_model_selection`。
 
@@ -14,16 +14,16 @@
 
 | 渠道标识 | 类型 | 初始模型选择 |
 |---|---|---|
-| `android-cn` | 普通渠道 | HR/BR、SpO2、BP、糖尿病风险模型分别选择下文的 `1.0.0` |
-| `android-intl` | 普通渠道 | HR/BR、SpO2、BP、糖尿病风险模型分别选择下文的 `1.0.0` |
-| `ios-cn` | 普通渠道 | HR/BR、SpO2、BP、糖尿病风险模型分别选择下文的 `1.0.0` |
-| `ios-intl` | 普通渠道 | HR/BR、SpO2、BP、糖尿病风险模型分别选择下文的 `1.0.0` |
-| `wxapp` | 普通渠道 | HR/BR、SpO2、BP、糖尿病风险模型分别选择下文的 `1.0.0` |
+| `android-cn` | 普通渠道 | 独立 HR、BR、SpO2、BP、糖尿病风险各 `1.0.0`；统一 PPG `2.0.0` |
+| `android-intl` | 普通渠道 | 同上 |
+| `ios-cn` | 普通渠道 | 同上 |
+| `ios-intl` | 普通渠道 | 同上 |
+| `wxapp` | 普通渠道 | 同上 |
 | `manager` | 管理渠道 | 不配置普通用户模型选择 |
 
-每个普通渠道分别维护四个模型选择，各自指向对应的已发布初始版本，并非四选一。某算法的真实制品尚未由环境提供并核验时，不得发布空制品版本或配置不存在的选择；补齐制品后再完成该环境的初始配置。上述选择是初始配置，不是持续强制的默认值。管理人员后续可以按渠道切换版本；维护时不得因重新录入初始数据而覆盖已有选择。
+每个普通渠道独立维护对应模型的选择，不是多选一；本次独立 HR、BR 各 `1.0.0` 与统一 PPG `2.0.0` 均投放五普通渠道。SpO2、BP、糖尿病及 PPG+ACC 场景的现有版本和选择保持不变。制品未核验不得发布空制品版本或不存在的选择，`manager` 不配置用户模型选择。
 
-两个统一场景不加入上述默认初始选择。只有在获授权的隔离联调环境完成下文配置后，才显式为指定普通渠道选择场景模型；这不会要求删除、取消或切换原四个模型的已有选择。本文更新不执行任何业务数据写入或生产发布。
+切换前先新增独立 HR、BR 并对照旧融合实现；对照完成后按授权清理测试环境全部推理历史及其输入、指标、输出等依赖，再退役旧融合模型及引用 `ppg.active.offline.all.v1` 的旧发布版本。保留 `ppg.active.offline.all` 模型，新增 `2.0.0` 绑定 `.all.v2`。旧融合 key、旧 PPG 场景 v1 不保留兼容别名；不可将这些测试环境清理步骤擅自用于生产。
 
 ## 管理账户
 
@@ -31,19 +31,23 @@
 
 ## 初始模型版本
 
-| 字段 | 初始值 |
-|---|---|
-| 模型编码 | `ppg.active.offline.hr_br` |
-| 模型名称 | `HR/BR v1` |
-| 模型说明 | 使用主动采集的 PPG 信号离线测量心率（HR）和呼吸率（BR），返回两项数值、信号质量评分及处理后的 PPG 与呼吸波（RSP）文件；计算结果不构成医学诊断。 |
-| 版本号 | `1.0.0` |
-| 算法标识 | `ppg.active.offline.hr_br.v1` |
-| 参数 | `null`（该算法不接受非空参数） |
-| 必需输入 | `ppg`（CSV） |
-| 必需制品 | 无 |
-| 必需健康资料 | 无 |
-| 必需指标 | `hr`、`br` |
-| 示例算法 | 否，`isExample=false` |
+### 独立心率与呼吸率 v1
+
+| 字段 | HR | BR |
+|---|---|---|
+| 模型编码 | `ppg.active.offline.hr` | `ppg.active.offline.br` |
+| 模型名称 | `HR v1` | `BR v1` |
+| 模型说明 | 独立测量心率、实际质量及处理后 PPG，不构成医学诊断 | 独立测量呼吸率、实际质量及处理后呼吸波，不构成医学诊断 |
+| 版本号 | `1.0.0` | `1.0.0` |
+| 算法标识 | `ppg.active.offline.hr.v1` | `ppg.active.offline.br.v1` |
+| 参数 | `null` 或 `{}`，拒绝非空参数 | 同左 |
+| 必需输入 | `ppg`（CSV） | `ppg`（CSV） |
+| 必需制品、健康资料 | 均无 | 均无 |
+| 指标 | 仅 `hr` | 仅 `br` |
+| 输出文件逻辑名 | 仅 `processed_ppg` | 仅 `processed_rsp` |
+| 示例算法 | 否，`isExample=false` | 否，`isExample=false` |
+
+二者同源复用共享 PPG 输入、预处理与质量规则，独立推理；HR 仅 `hr/quality`，BR 仅 `br/quality`。BR 先拒绝 NaN/无穷，再限制到 `[8,20]`，不补 `12`；独立成功载荷不含 nullable 指标或内部 `failures`。
 
 ### 血氧 v1
 
@@ -97,28 +101,28 @@
 
 ### 统一场景版本
 
-场景各自对应一个新 `Model` 和一个场景发布版本，不是三个独立版本 ID 的组合参数。名称固定如下；模型编码沿用去掉实现修订后缀的命名约定，前端仍须使用目录实际返回值：
+场景各自固定一个 `ModelVersion`，不是独立版本 ID 的组合参数。统一 PPG 复用既有 `ppg.active.offline.all` 模型并发布 `2.0.0`，不重复建模型；PPG+ACC 保持原配置。名称与编码如下，前端仍须使用目录实际返回值：
 
 | 字段 | 统一PPG场景 | 统一PPG+ACC场景 |
 |---|---|---|
 | 模型编码 | `ppg.active.offline.all` | `ppg_acc.active.offline.all` |
 | 模型名称 | `统一PPG场景` | `统一PPG+ACC场景` |
-| 算法标识 | `ppg.active.offline.all.v1` | `ppg_acc.active.offline.all.v1` |
-| 版本号 | 环境实际创建的版本；首次可采用 `1.0.0`，不假定已有 | 同左 |
-| 参数 | `null` 或 `{}`，拒绝非空参数 | `null` 或 `{}`，拒绝非空参数 |
-| 固定成员 | `hr_br` → `spo2` → `diabetes` | 仅 `bp` |
-| 固定成员实现 | `ppg.active.offline.hr_br.v1`、`ppg.active.offline.spo2.v1`、`ppg.active.offline.diabetes.v1` | `ppg_acc.active.offline.bp.v1` |
+| 算法标识 | `ppg.active.offline.all.v2` | `ppg_acc.active.offline.all.v1` |
+| 版本号 | `2.0.0` | 保持环境已有版本，首次可用 `1.0.0` |
+| 参数 | `null` 或 `{}`，拒绝非空参数 | 同左 |
+| 固定成员 | `hr` → `br` → `spo2` → `diabetes` | 仅 `bp` |
+| 固定成员实现 | `ppg.active.offline.hr.v1`、`ppg.active.offline.br.v1`、`ppg.active.offline.spo2.v1`、`ppg.active.offline.diabetes.v1` | `ppg_acc.active.offline.bp.v1` |
 | 必需输入 | `ppg`（CSV） | `ppg`、`acc`（均为 CSV） |
 | 完整必需制品 | `spo2`（ONNX）、`feature_names`、`stable_features`（JSON）、`diabetes`（ONNX） | `sbp`、`dbp`（joblib）、`normalize`（CSV） |
 | 完整投影配置建议 | `hr`、`br`、`spo2`、`diabetes_probability` | `sbp`、`dbp` |
 | 必需健康资料 | 无 | 无；沿用血压成员的提交时冻结资料及缺失值规则 |
 | 示例算法 | 否，`isExample=false` | 否，`isExample=false` |
 
-`all.v1` 的成员集合和实现修订固定在代码中，不自动扩展，也不读取其他模型的渠道当前版本。场景版本直接绑定全部成员制品，不能在参数里传独立 `modelId` 或 `versionId`。独立模型版本切换不改变场景资源；替换场景制品需新建场景版本，改变成员集合或计算解释需新算法修订。
+两个场景的成员集合和实现修订固定在代码中，不自动扩展，也不读取其他模型的渠道当前版本。场景版本直接绑定全部成员制品，不能在参数里传独立 `modelId/versionId`。独立版本切换不改变场景资源；替换制品需新建场景版本，改变成员集合或解释需新算法修订。PPG v2 按四成员成功数决定 outcome：4/1–3/0 分别为 `ALL_SUCCEEDED/PARTIALLY_SUCCEEDED/ALL_FAILED`；BR 失败不影响 HR，文件分别为 `hr_processed_ppg/br_processed_rsp`。
 
 发布仍检查制品集合完整、无额外逻辑名、后缀合法且物理文件存在，不因运行时允许部分成功而放宽。制品内容与信任要求沿用各独立成员，特别是 `joblib` 可在加载时执行代码，不得使用不可信来源。场景只投影成功成员实际产生且版本选定的指标，成员失败不补零；`risk_level` 仅保留在糖尿病完整结果中，不新建指标定义。
 
-四个独立算法和两个场景的 `isExample=false` 均只表示不是示例执行器，不是临床认证、医学准确性保证或诊断许可。合成制品联调只证明流程，不代替真实模型核验或医学验收。
+五个独立算法和两个场景的 `isExample=false` 只表示不是示例执行器，不是临床认证、医学准确性保证或诊断许可。合成制品联调只证明流程，不代替真实模型核验或医学验收。
 
 模型编码（`health_model.code`）全局唯一；同一模型只保留一条 `Model` 记录，多个 `ModelVersion` 关联该模型并可引用 `.v1`、`.v2` 等不同算法修订。不要为每个算法修订重复创建相同类别的模型记录。
 
@@ -133,27 +137,27 @@
 | `dbp` | 舒张压 | `number` | `mmHg` |
 | `diabetes_probability` | 糖尿病风险概率（旧版兼容输出） | `number` | `ratio` |
 
-只有正式算法已在当前部署代码中注册、参数与算法契约一致、所需制品由部署环境提供且核验通过、所选指标代码和值类型与单位匹配后，版本才能发布；四个独立模型的初始渠道配置仍按上文维护。两个场景只按下文显式隔离联调流程选择，不自动覆盖旧配置。具体接口、请求字段和发布校验见[模型与算法开发](models-and-algorithms.md)中的模型目录操作说明。
+只有正式算法已在当前部署中注册、参数符合契约、制品核验通过、所选指标代码、类型和单位匹配后才能发布。独立 HR、BR 与 PPG v2 的五普通渠道目标见上文；具体接口见[模型与算法开发](models-and-algorithms.md)。
 
 ## 维护流程
 
 1. 先按[环境配置与服务运行](environment.md)完成数据库迁移；迁移只建立表结构，不会自动创建上述业务目录数据。
-2. 确认当前部署的 `health-inference` 已注册本清单所需的四种正式算法，且每个版本声明的输入、制品、资料和指标契约与对应注册定义一致；所需模型制品必须由该环境提供并完成核验。
-3. 使用受保护的管理端目录接口创建或核对四个模型及其版本，上传各版本所需制品，设置完整指标集合后再发布；模型 ID 和版本 ID 使用该环境接口返回的值。
-4. 为每个普通渠道分别选择 HR/BR、SpO2、BP 和糖尿病风险模型的已发布 `1.0.0` 版本。`manager` 仅用于管理认证和管理接口，不配置普通模型选择。
-5. 首次配置后，按数据库中的现状维护渠道选择。已发布版本不可原地改写；若计算契约改变，应按算法与模型版本规则发布新配置，不要用重新初始化覆盖历史数据。
+2. 确认当前部署支持五种正式独立算法及两个精确场景 key，所需制品由环境提供并核验。
+3. 创建独立 HR、BR 模型各 `1.0.0`，分别绑定 `hr`、`br` 后发布；其他独立模型沿用既有配置，不重复初始化。
+4. 保留统一 PPG 模型，创建 `2.0.0` 绑定 `.all.v2`，上传完整制品并绑定四指标后发布；把 HR、BR 和 PPG v2 各自选择到全部五普通渠道。
+5. 先对照验证再按授权清测试推理历史、退役旧融合及旧 PPG v1 版本与渠道引用。不得原地改已发布配置，不自动覆盖无关模型或 PPG+ACC 选择。保留实际操作记录，本文不代表操作已执行。
 
 该文档描述的是初始期望状态，不代表每个环境的数据库当前状态。每次调整初始模型、版本、指标或默认渠道选择时，同步更新本清单，并遵守[模型与算法开发](models-and-algorithms.md)中的发布约束。
 
-## 统一场景的隔离联调发布与选择
+## 统一场景的发布与选择
 
-以下是人工操作说明，不代表已在测试或生产环境执行，也不提供自动初始化或渠道切换脚本。仅对获授权的隔离联调环境操作；先确认 API、支持两个精确 key 的消费者、数据库、Redis 和存储均就绪。现有四个独立模型及历史任务继续保留，不做数据库迁移、生产发布或原渠道自动切换。
+以下为人工操作说明，不代表已在测试或生产环境执行。操作须先确认 API、支持精确 key 的消费者、数据库、Redis 和共享存储就绪。此次测试环境 HR/BR 拆分授权包含历史清理与旧版本退役；生产操作需独立授权。PPG+ACC 场景仅保留既有流程，不因 PPG 升级重建或切换。
 
 所有路径前缀为该环境的 `/api/v1`。写接口统一使用 `manager` 渠道登录返回的 Access Token；最后的普通目录和任务接口改用目标普通渠道的令牌。`{model_id}`、`{version_id}` 均是占位参数，必须替换为本次创建响应或环境受控记录中的真实整数，不能把文档里的示例当作已存在资源。版本号也使用该环境实际配置值。
 
 ### 1. 创建场景模型与空参数版本
 
-分别调用 `POST /api/v1/manager/models`，请求为：
+仅在模型确实不存在的全新环境调用 `POST /api/v1/manager/models`，可用以下请求；此次升级必须复用既有统一 PPG 模型，不重新创建 PPG+ACC 模型：
 
 ```json
 {"code":"ppg.active.offline.all","name":"统一PPG场景"}
@@ -165,15 +169,13 @@
 
 保存各自响应的 `data.modelId`，不要混用。若模型已存在，使用该环境受控记录中的 ID 核对版本；当前没有管理端模型总列表接口，不能虚构查询路径或用普通渠道目录冒充管理端全量记录。冲突不等于本次已创建成功。
 
-对各自的真实模型 ID 调用 `POST /api/v1/manager/models/{model_id}/versions`。首次版本可分别使用以下请求；若已有该版本，先通过 `GET /api/v1/manager/models/{model_id}/versions` 核对，不覆盖已发布配置：
+对真实模型 ID 调用 `POST /api/v1/manager/models/{model_id}/versions`。统一 PPG 在既有模型下新增 `2.0.0`；若版本已存在，先用版本列表核对，不能覆盖已发布配置：
 
 ```json
-{"version":"1.0.0","algorithmKey":"ppg.active.offline.all.v1","params":null}
+{"version":"2.0.0","algorithmKey":"ppg.active.offline.all.v2","params":null}
 ```
 
-```json
-{"version":"1.0.0","algorithmKey":"ppg_acc.active.offline.all.v1","params":null}
-```
+PPG+ACC 已有版本原样保留；上文 `ppg_acc.active.offline.all.v1` 的 `1.0.0` 仅是全新环境首次配置约定，不要求此次升级再次创建、发布或切换。
 
 保存各自响应的 `data.versionId`、`data.algorithmKey`、`data.params` 和版本号；只有返回的未发布版本才能继续配置。不要把独立算法的发布版本 ID 填入场景参数。
 
@@ -203,18 +205,18 @@
 
 PUT 替换完整集合，不是追加。确认响应确为该场景应有指标，且不含 `risk_level`。
 
-### 3. 发布并显式选择隔离联调渠道
+### 3. 发布并选择普通渠道
 
 确认全部制品已核验后，分别调用 `POST /api/v1/manager/model-versions/{version_id}/publish`，无请求体。以响应的真实版本 ID、算法标识及非空 `publishedAt` 确认发布结果；创建成功不等于发布成功。发布后算法、参数、制品和指标不能原地改写。
 
-发布本身不会让用户目录自动出现新模型。仅在获授权的隔离联调普通渠道，分别调用 `PUT /api/v1/manager/channels/{channel}/models/{model_id}/selection`，请求的 `versionId` 使用对应场景刚发布响应的实际值。此处不写虚构的环境 ID；两个模型的 ID 和版本 ID 必须成对使用。不要操作 `manager` 的普通模型选择，不删除、取消或切换原四个模型的已有渠道配置。对既有模型切换版本会使目标渠道旧版本草稿失效，不能把这种操作当作无影响的初始化。
+发布本身不会自动增加用户目录。对五普通渠道 `android-cn/android-intl/ios-cn/ios-intl/wxapp`，分别调用 `PUT /api/v1/manager/channels/{channel}/models/{model_id}/selection`，使用对应独立 HR、BR 的 `1.0.0` 和统一 PPG `2.0.0` 实际版本 ID。三组模型与版本必须成对使用，不选择 `manager`；无关模型与 PPG+ACC 原选择不变。旧融合选择和旧 PPG v1 发布版本按前述验证、历史清理顺序退役。切换既有模型版本会使目标渠道旧草稿失效，不是无影响初始化。
 
-最后用目标普通渠道账号调用 `GET /api/v1/{channel}/models?offset=0&limit=100`（需要时继续分页），确认两个场景条目的实际 `modelId`、`modelCode`、`modelName`、`versionId`、版本号、`requiredInputs` 和 `isExample=false`。前端创建任务使用这次目录返回的 `modelId`，不是管理响应中的版本 ID，也不硬编码名称推导 ID；普通目录不返回 `algorithmKey`，精确 key 应在前述管理版本响应中核对。
+最后以各普通渠道账号读取 `GET /api/v1/{channel}/models?offset=0&limit=100` 并按需分页，确认独立 HR、BR 和 PPG v2 的真实模型/版本 ID、版本号、requiredInputs 与 `isExample=false`，同时确认其他模型选择未改。前端使用目录 modelId，不用版本 ID。普通目录不返回 algorithmKey，精确 key 由管理版本响应核对；不得把目标清单写成已发布证据。
 
-### 4. 按原任务接口联调，不改变历史用法
+### 4. 按原任务接口联调
 
-对场景目录返回的 `modelId` 使用现有创建草稿、上传 `requiredInputs`、提交、详情和下载接口。统一PPG场景上传一份 `ppg`，统一PPG+ACC场景分别上传 `ppg`、`acc`；前端不提交成员列表、算法参数或独立版本 ID。完整结果契约及部分成功、全部失败、血压成员成功/失败和场景自身失败示例见[前端对接指南第 6.5–6.6 节](../frontend-integration.md#65-统一ppg场景ppgactiveofflineallv1)。
+对目录返回的 `modelId` 使用原草稿、上传、提交、详情和下载接口；PPG v2 只上传一份 `ppg`，四成员依次读取同一原始文件，前端不提交成员列表、算法参数或独立版本 ID。PPG+ACC 仍上传 `ppg/acc`。结果示例见[前端指南第 6.5–6.6 节](../frontend-integration.md#65-统一ppg场景ppgactiveofflineallv2)。
 
 联调必须区分任务 `SUCCEEDED` 与测量 `outcome`；全部成员失败仍可为 `SUCCEEDED / ALL_FAILED`，但没有指标或输出。数值从 `result.results.<成员>.result` 读取，文件只按顶层 `result.output_files` 已登记的带成员前缀对象键下载，不访问服务器目录。场景整体超时等自身失败为 `FAILED / result=null`，不保存中间结果。
 
-四个独立算法仍按原模型目录、原任务结果字段和无成员前缀的输出逻辑名调用，历史结果不改写成场景结构。后续如需生产发布、渠道迁移或撤回场景流量，应另走获授权的部署流程；回退前须由支持新 key 的消费者排空已提交场景，保留历史定义与制品，不能用不认识场景 key 的旧消费者接管未终结任务。
+五个独立算法仍使用非场景结果及不带成员前缀的输出逻辑名；HR/BR 现在是两个独立模型、任务与成功条件。场景 HR、BR 路径分别为 `result.results.hr.result.hr`、`result.results.br.result.br`，独立失败或 BR 成员失败不抹去其他成功结果。旧实现验收记录不能作为新版本验证证据，需另存真实执行结果；旧 key 退役后不通过兼容别名接管未终结任务。

@@ -29,7 +29,7 @@ curl --include --request POST "$API/$CHANNEL/tasks/$TASK_ID/files" \
   --form "file=@$PPG_FILE"
 ```
 
-逻辑名必须来自模型目录返回的算法输入契约；当前正式 HR/BR 与 SPO2 v1 均使用 `ppg`。上传文件应满足对应算法文档中的共享 CSV 格式和专属采样率、长度等条件：[HR/BR v1](algorithms/ppg-active-offline-hr-br-v1.md)、[SPO2 v1](algorithms/ppg-active-offline-spo2-v1.md)。仓库不附带可直接上传的健康数据样例。同名重传只将新记录设为选中，旧记录和文件保留；`SUBMITTED`、`RUNNING` 或终态任务不能上传。HTTP 响应不包含服务器文件路径或存储键。
+逻辑名来自模型目录的输入契约；独立 HR、BR 与 SPO2 v1 均使用 `ppg`。文件需满足共享 CSV 格式和各算法采样率、长度条件：[HR v1](algorithms/ppg-active-offline-hr-v1.md)、[BR v1](algorithms/ppg-active-offline-br-v1.md)、[SPO2 v1](algorithms/ppg-active-offline-spo2-v1.md)。仓库不附带健康数据样例。同名重传只切换选中记录，旧记录与文件保留；非 `DRAFT` 不可上传。响应不包含路径或存储键，上传成功不表示算法校验或推理成功。
 
 新输入存储路径按任务创建时间生成，而不是按上传时间：日期目录和文件名前缀使用同一次 `Asia/Shanghai` 转换，格式为 `yyyyMMdd` 和 `yyyyMMdd_HHmmss`。文件名包含 `task_id`、`user_id`、固定算法 key、逻辑名和 UUID；客户端原始文件名不写入路径，只从其最后一个扩展名提取并按算法契约校验。跨日上传仍归入任务创建日期，同名重传使用新 UUID，旧文件继续保留。路径编码、模型制品布局和存量读取规则见[运行环境中的本地文件目录约定](environment.md#新文件目录与命名)。路径字段用于运维辨认归属，不替代数据库权限检查，也不能单独恢复任务的模型参数或资料快照。
 
