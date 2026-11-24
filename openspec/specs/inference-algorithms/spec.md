@@ -33,8 +33,8 @@
 - **THEN** 每个任务按自身固定版本选择对应实现，不读取渠道当前选择或自动解析为最新修订
 
 #### Scenario: 请求无修订号别名
-- **WHEN** 新正式版本使用 `ppg.active.offline.hr_br` 或带 `latest` 的未注册别名发布
-- **THEN** 发布被拒绝，不能静默替换为 `ppg.active.offline.hr_br.v1`
+- **WHEN** 新正式版本使用 `ppg.active.offline.hr`、`ppg.active.offline.br` 或带 `latest` 的未注册别名发布
+- **THEN** 发布被拒绝，不能静默替换为独立 v1 执行器
 
 #### Scenario: 发布已移除的诊断标识
 - **WHEN** 管理人员请求创建或发布使用 `hr_br.example` 的模型版本
@@ -59,8 +59,8 @@
 - **WHEN** PPG 场景中的一个成员报告质量拒绝，其他成员尚未执行
 - **THEN** 拒绝成员不再计算，其余成员仍各自执行完整计算链，场景不沿用失败成员的质量结论
 
-### Requirement: HR BR v1 接受明确的单块 PPG 输入
-正式算法 `ppg.active.offline.hr_br.v1` MUST 要求输入逻辑名 `ppg`，不要求权重制品、健康资料或客户端元数据。CSV MUST 包含有限且严格递增的毫秒时间戳 `timestampFrame`，以及一组完整的 RGB 或 YUV 通道。每帧 MUST 只有一条记录；可选 `blockIndex` 存在时每行 MUST 为整数 `0`。输入不满足执行条件时 MUST 报告明确输入错误，不选块、不融合、不插值或补齐。
+### Requirement: 独立 HR 与 BR v1 接受明确的单块 PPG 输入
+正式 `ppg.active.offline.hr.v1` 与 `ppg.active.offline.br.v1` MUST 要求 `ppg` CSV、空参数、零制品和零必需健康资料，身份 MUST 为 `isExample=false`。CSV MUST 包含有限且严格递增的毫秒 `timestampFrame` 与恰好一组完整 RGB 或 YUV 通道；可选 `blockIndex` 每行 MUST 为整数 `0`。输入不满足条件 MUST 明确失败，不选块、融合、插值或补齐。两实现 MUST 同源复用共享输入、预处理、PPG 质量和 CSV 输出模块，不复制前置规则或跨任务共享本次状态。
 
 #### Scenario: 接受 RGB 和 YUV 单块记录
 - **WHEN** 输入分别使用 `avgR,avgG,avgB` 或 `avgY,avgU,avgV` 的完整通道组，时间轴与数据满足单块执行条件
@@ -74,24 +74,24 @@
 - **WHEN** CSV 缺列、通道组不完整或同时提供两组通道，数值非有限，时间轴不严格递增，或数据不足以执行所需处理
 - **THEN** 算法报告相应的输入错误，不伪造成功数值或默认质量结论
 
-### Requirement: HR BR v1 基于实际输入估计两个指标
-HR BR v1 MUST 依据实际输入生成心率和呼吸率估计，不用固定载荷代替计算。v1 MUST 固定所迁移的信号提取、预处理、速率估计和聚合规则，拒绝改变计算含义的未声明参数；该实现不要求模型制品或默认健康资料。正式实现身份 MUST 为非示例，但实际计算成功不表示已经完成医学准确性认证。
+### Requirement: 独立 HR 与 BR v1 依据实际输入分别估计
+HR v1 MUST 仅执行心率推理，BR v1 MUST 仅执行呼吸率推理，不相互调用速率估计作为成功条件。两者 MUST 固定原信号提取、预处理与聚合规则，不接受改变计算含义的非空参数。HR 使用 `0.75–4 Hz` PPG，BR 使用 `0.1–0.5 Hz` 呼吸波；二者均使用实际 PPG 质量门禁。正式身份不表示医学准确性认证。
 
 #### Scenario: 不同可用心率分量产生对应估计
 - **WHEN** 两份满足质量条件的确定性合成输入具有不同的已知心率分量
 - **THEN** 原始心率估计分别反映各自输入，并可在明确容差下与旧计算链对照，不返回同一固定心率
 
 #### Scenario: 正式执行器可发布
-- **WHEN** 模型版本引用完整 v1 key，参数与所选 HR/BR 指标契约有效，且制品集合为空
+- **WHEN** 模型版本分别引用独立 HR 或 BR 完整 v1 key，空参数、零制品且只选择对应指标
 - **THEN** 版本可按既有发布规则发布，目录和任务公开 `isExample=false`，零制品不阻止执行
 
 
-### Requirement: HR BR v1 使用实际 PPG 质量分数执行门禁
-HR BR v1 MUST 对预处理 PPG 计算实际质量分数并使用固定阈值 `70` 比较；分数严格小于 `70` 时 MUST 以 `LOW_SCORE` 和实际比较值终止。分数等于阈值允许继续，但不保证后续估计成功。非法评分或意外异常 MUST NOT 补成零分、满分或自动解释为 `NO_VALID_SIGNAL`。
+### Requirement: 独立 HR 与 BR v1 使用实际 PPG 质量门禁
+两算法 MUST 使用同源共享的预处理 PPG 质量策略与固定阈值 `70`，严格低于阈值时以 `LOW_SCORE` 和实际比较值终止。等于阈值允许继续，但不保证推理成功。非法评分或意外异常 MUST NOT 补成零分、满分或自动解释为 `NO_VALID_SIGNAL`；共享代码不表示共用某次任务或成员的质量结论。
 
 #### Scenario: 低于阈值拒绝
 - **WHEN** 本次实际质量分数为 `69.999`
-- **THEN** 算法报告 `LOW_SCORE`，保留 `69.999` 和 `70`，不继续估计 HR/BR
+- **THEN** 对应算法报告 `LOW_SCORE`，保留 `69.999` 与 `70`，不进入该项速率估计
 
 #### Scenario: 达到阈值继续
 - **WHEN** 本次实际质量分数为 `70` 且其他执行条件有效
@@ -101,31 +101,31 @@ HR BR v1 MUST 对预处理 PPG 计算实际质量分数并使用固定阈值 `70
 - **WHEN** 质量计算产生无法明确归因的 NaN 或无穷值
 - **THEN** 算法按执行或契约错误终止，不生成成功质量信息，也不报告虚构的低分拒绝
 
-### Requirement: HR BR v1 保留 BR 上限并拒绝非有限结果
-HR BR v1 MUST 在任何范围处理前确认原始 HR 和 BR 为有限数值；任一结果为 NaN 或正负无穷时 MUST 报告 `RESULT.INVALID_OUTPUT`。有限 BR MUST 限制在闭区间 `[8, 20]` 次/分钟，低于 `8` 取 `8`，高于 `20` 取 `20`，区间内保留原值；有限 HR MUST 保留原估计，不新增限幅。v1 MUST NOT 将无效 BR 补为 `12`，也不新增四舍五入或其他未声明规则。
+### Requirement: BR v1 限制有限结果且 HR v1 独立校验
+各独立算法 MUST 在输出前确认自身原始速率有限，NaN 或正负无穷 MUST 以 `RESULT.INVALID_OUTPUT` 失败且不造数。有限 BR MUST 限制到闭区间 `[8,20]`，低于 `8` 取 `8`、高于 `20` 取 `20`、区间内保留原值，不补 `12` 或新增舍入；有限 HR MUST 保留原估计，不新增限幅。HR MUST NOT 校验 BR 或因 BR 失败终止。
 
 #### Scenario: 超过 BR 上限
-- **WHEN** 有限原始 HR 为 `72.5`，有限原始 BR 为 `24`
-- **THEN** 完整结果为 HR `72.5`、BR `20`，对应投影值与之相同
+- **WHEN** 独立 HR 原始值为有限 `72.5`，独立 BR 原始值为有限 `24`
+- **THEN** 两个结果分别为 HR `72.5`、BR `20`，各投影与自身结果一致
 
 #### Scenario: 等于或低于 BR 上限
-- **WHEN** 原始 HR/BR 有限且 BR 为 `8`、`20` 或 `12.1356`
-- **THEN** 对应 BR 分别保持 `8`、`20` 或 `12.1356`，HR 不受 BR 范围处理影响
+- **WHEN** 独立 BR 原始值为 `8`、`20` 或 `12.1356`
+- **THEN** BR 分别保留这些原值，独立 HR 不受其范围处理影响
 
 #### Scenario: 低于 BR 下限
-- **WHEN** 有限原始 HR 为 `72.5`，有限原始 BR 为 `6`
-- **THEN** 完整结果为 HR `72.5`、BR `8`，对应投影值与之相同
+- **WHEN** 独立 BR 原始值为有限 `6`
+- **THEN** BR 完整结果与投影均为 `8`，不需要 HR 估计作为前提
 
 #### Scenario: 非有限结果不得被截断隐藏
-- **WHEN** 原始 BR 为正无穷或 NaN，或原始 HR 为非有限值
-- **THEN** 计算以结果错误终止，不通过上限截断或默认值生成成功结果，不保存部分指标
+- **WHEN** 独立 BR 原始值为正无穷或 NaN，或独立 HR 自身原始值非有限
+- **THEN** 对应单算法失败，无指标或权威输出，不通过限幅隐藏；其他独立算法及场景其他成员不受该结果错误影响
 
-### Requirement: HR BR v1 返回一致的健康指标与处理后波形
-HR BR v1 的成功结果 MUST 包含有限的 `hr`、`br` 和实际质量信息；投影代码分别为 `hr`、`br`，单位分别为 `beats_per_minute`、`breaths_per_minute`。成功执行 MUST 返回逻辑名 `processed_ppg` 与 `processed_rsp` 的 CSV 文件，保留毫秒时间轴及对应处理后信号；文件引用 MUST 通过既有受保护下载链路提供，结果不暴露本地绝对路径。
+### Requirement: 独立 HR 与 BR v1 仅返回自身指标与波形
+HR 计算载荷 MUST 恰含有限 `hr` 与实际 `quality`，仅投影 `hr/number/beats_per_minute` 并输出 `processed_ppg`（`ppg-processed.csv`，`timestamp,ppg`）；BR 载荷 MUST 恰含有限 `br` 与实际 `quality`，仅投影 `br/number/breaths_per_minute` 并输出 `processed_rsp`（`rsp-processed.csv`，`timestamp,rsp`）。成功数值 MUST 与投影一致，不允许 nullable 指标、另一指标或内部 `failures`。文件 MUST 保留输入毫秒时间轴与逐帧信号，通过受保护引用提供，不暴露路径。独立失败 MUST 为任务 `FAILED/result=null`，无部分成功。
 
 #### Scenario: 成功结果和输出文件可核对
-- **WHEN** 正式任务成功完成且版本选择投影 HR、BR
-- **THEN** 任务详情的 HR/BR 与指标一致，两个处理后文件可由任务所有者下载，时间轴和信号行对应同一输入
+- **WHEN** 独立 HR 与 BR 分别成功，版本各选择自身指标
+- **THEN** 各任务只包含自身速率与质量，分别授权下载自身 PPG 或呼吸波，不要求另一个任务成功
 
 #### Scenario: 不允许越权下载
 - **WHEN** 其他用户或不匹配渠道请求该任务的处理后文件
@@ -494,11 +494,11 @@ HR BR v1 的成功结果 MUST 包含有限的 `hr`、`br` 和实际质量信息�
 - **THEN** 按既有访问规则拒绝，不因新增血压算法开放文件访问
 
 ### Requirement: 统一离线场景具有固定成员与明确身份
-系统 MUST 提供 `统一PPG场景` 对应的 `ppg.active.offline.all.v1`，成员固定为 `hr_br` 对应 `ppg.active.offline.hr_br.v1`、`spo2` 对应 `ppg.active.offline.spo2.v1`、`diabetes` 对应 `ppg.active.offline.diabetes.v1`；以及 `统一PPG+ACC场景` 对应的 `ppg_acc.active.offline.all.v1`，唯一成员为 `bp` 对应 `ppg_acc.active.offline.bp.v1`。两者 MUST 为非示例正式执行器，`all.v1` 不自动扩充成员。
+系统 MUST 提供 `统一PPG场景` 的 `ppg.active.offline.all.v2`，固定按 `hr`（`ppg.active.offline.hr.v1`）→`br`（`ppg.active.offline.br.v1`）→`spo2`（`ppg.active.offline.spo2.v1`）→`diabetes`（`ppg.active.offline.diabetes.v1`）执行；`统一PPG+ACC场景` 仍为 `ppg_acc.active.offline.all.v1`，仅含 `bp`（`ppg_acc.active.offline.bp.v1`）。两者 MUST 非示例，不自动扩充成员。旧融合 `ppg.active.offline.hr_br.v1` 与旧 `ppg.active.offline.all.v1` MUST 退役，不保留兼容别名；归档材料不变。
 
 #### Scenario: PPG 场景执行全部固定成员
 - **WHEN** 合法 PPG 场景任务执行并完成汇总
-- **THEN** 结果恰好包含 hr_br、spo2、diabetes 三项，不要求客户端指定成员或逐项创建任务
+- **THEN** 结果恰好包含 hr、br、spo2、diabetes 四项，不要求客户端指定成员或逐项建任务
 
 #### Scenario: PPG ACC 场景只测血压
 - **WHEN** 合法 PPG ACC 场景任务执行并完成汇总
@@ -506,14 +506,14 @@ HR BR v1 的成功结果 MUST 包含有限的 `hr`、`br` 和实际质量信息�
 
 #### Scenario: 新算法不会自动进入旧场景
 - **WHEN** 系统增加其他独立算法或成员的新实现修订
-- **THEN** 两个 all.v1 继续使用固定成员与原实现修订，不通过最新版本或注册表枚举改变组合
+- **THEN** PPG all.v2 与 PPG+ACC all.v1 继续使用固定成员与实现，不自动改组合
 
 ### Requirement: 场景输入和资源固定于一个发布版本
 PPG 场景 MUST 要求 `ppg` CSV 及 `spo2`、`feature_names`、`stable_features`、`diabetes` 制品；PPG ACC 场景 MUST 要求 `ppg`、`acc` CSV 及 `sbp`、`dbp`、`normalize` 制品。制品格式 MUST 沿用对应成员规则，发布时集合完整且文件存在。两个场景 MUST 拒绝非空参数，不要求额外必需资料或客户端元数据；成员只能读取同一次任务的原始文件、冻结快照及场景版本制品，不读取其他模型的渠道当前选择。
 
 #### Scenario: 一次上传供多个成员读取
 - **WHEN** 用户为 PPG 场景上传一份原始 PPG 并提交
-- **THEN** 三个成员使用该任务的同一原始输入，不额外要求上传副本，不将处理后单通道 PPG 作为其他成员输入
+- **THEN** 四成员使用同一份原始输入，不要求副本，不把处理后单通道信号作为其他成员输入
 
 #### Scenario: 版本切换不改变已提交场景
 - **WHEN** 场景提交后渠道切换场景版本或独立算法版本
@@ -531,27 +531,27 @@ PPG 场景 MUST 要求 `ppg` CSV 及 `spo2`、`feature_names`、`stable_features
 场景 MUST 隔离成员资源加载、输入校验、质量拒绝、执行异常和结果错误，将其记录为该成员失败并继续其他成员；不可用制品不得自动替换为其他版本。成员调用内部的原子成功规则 MUST 保持，失败成员不返回部分指标或成功文件。场景 MUST NOT 吞掉进程终止或整体硬超时，也不得把无法完成汇总的场景错误伪装成全部成员已完成。
 
 #### Scenario: 制品不兼容仍保留其他成功
-- **WHEN** 糖尿病模型无法加载或其维度不匹配，而 HR/BR 与血氧正常
+- **WHEN** 糖尿病模型无法加载或维度不匹配，而独立 HR、BR 与血氧正常
 - **THEN** diabetes 记录 INFERENCE.INVALID_ARTIFACT，其他成功成员的完整结果、指标与文件仍被保留
 
 #### Scenario: 发布后成员文件缺失
 - **WHEN** 已发布场景的 diabetes 制品在实际使用前缺失，其他资源与原始输入仍可用
-- **THEN** diabetes 按制品不可用失败，HR/BR 与血氧仍可执行；场景不回退到其他制品
+- **THEN** diabetes 制品失败，HR、BR 与血氧仍可执行，场景不回退其他制品
 
 #### Scenario: 中间成员意外异常不阻止后续成员
-- **WHEN** HR/BR 已成功、血氧抛出普通未预期异常、糖尿病尚未执行
+- **WHEN** HR、BR 已成功，血氧抛出普通未预期异常，糖尿病尚未执行
 - **THEN** spo2 记录安全执行失败，diabetes 仍执行；异常正文不进入汇总
 
-#### Scenario: HR BR 内部仍不可部分成功
-- **WHEN** HR 有限但 BR 非有限
-- **THEN** hr_br 整项失败，不单独保留 HR；其他场景成员不受该失败影响
+#### Scenario: BR 失败不影响成功 HR
+- **WHEN** hr 成员产出有限 HR，而 br 成员产出 NaN
+- **THEN** hr 为 SUCCEEDED 并保留自身结果、指标、文件；br 为 FAILED/result=null，不造数，其他成员继续
 
 ### Requirement: 场景返回固定分组结果与测量结局
-场景完整计算载荷 MUST 恰好包含 `outcome`、`results`。results MUST 包含全部固定成员，每项恰好含 `algorithmKey`、`status`、`result`、`failureCode`、`failureMessage`、`qualityFailure`。成员 status 只能为 SUCCEEDED 或 FAILED；成功 result 保留对应单算法完整计算载荷，失败字段均为空；失败 result 为空并提供安全失败字段。所有成功时 outcome MUST 为 ALL_SUCCEEDED，部分成功为 PARTIALLY_SUCCEEDED，全部失败为 ALL_FAILED；不返回缺项、处理中成员或跨算法汇总质量分数。
+完整计算载荷 MUST 恰含 `outcome/results`，results 包含所有固定成员，每项恰含 `algorithmKey/status/result/failureCode/failureMessage/qualityFailure`。status MUST 仅为 SUCCEEDED 或 FAILED；成功保留独立算法载荷，失败字段为空；失败 result=null，仅有安全失败字段。PPG v2 MUST 按四成员成功数判定：4 为 ALL_SUCCEEDED，1–3 为 PARTIALLY_SUCCEEDED，0 为 ALL_FAILED，不允许沿用三成员计数或返回处理中成员、跨算法总质量。HR、BR 读数路径 MUST 分别为 `results.hr.result.hr/results.br.result.br`。
 
 #### Scenario: 混合成功失败的完整汇总
-- **WHEN** HR/BR、血氧成功，糖尿病质量拒绝
-- **THEN** outcome 为 PARTIALLY_SUCCEEDED，三项均存在，前两项保留其完整载荷，diabetes 的 result 为 null 且只公开安全失败信息
+- **WHEN** HR、BR、血氧成功，糖尿病质量拒绝
+- **THEN** outcome 为 PARTIALLY_SUCCEEDED，四项均存在，前三项保留自身载荷，diabetes 的 result=null 且只有安全失败信息
 
 #### Scenario: 所有成员失败仍有可解释结果
 - **WHEN** 所有固定成员都完成调用但均失败
@@ -565,7 +565,7 @@ PPG 场景 MUST 要求 `ppg` CSV 及 `spo2`、`feature_names`、`stable_features
 场景 MUST 只合并成功成员的原指标代码、类型、单位和数值：PPG 为 hr、br、spo2、diabetes_probability，PPG ACC 为 sbp、dbp。失败成员不产生指标行或默认值，risk_level 仍只在糖尿病完整结果中。场景 MUST 校验成员集合、实现标识、成功载荷、失败字段、outcome、指标及文件相互一致；伪造或损坏的最终汇总不得被保存为成功结果。
 
 #### Scenario: 只投影成功成员
-- **WHEN** HR/BR 与血氧成功，diabetes 失败，版本选中全部四个指标
+- **WHEN** HR、BR 与血氧成功，diabetes 失败，版本选中全部四指标
 - **THEN** 只保存 hr、br、spo2，数值等于各成功载荷中的原值，不创建 diabetes_probability 或 risk_level 投影
 
 #### Scenario: 全部失败没有指标

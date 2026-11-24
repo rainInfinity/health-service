@@ -167,8 +167,8 @@
 场景任务详情 MUST 保留现有响应包装、摘要、固定版本和时间字段。任务 SUCCEEDED MUST 表示场景已完成全部成员调用与合法汇总，而非所有测量成功；result.outcome MUST 明确为 ALL_SUCCEEDED、PARTIALLY_SUCCEEDED 或 ALL_FAILED。正常汇总的顶层 failureCode、failureMessage、qualityFailure MUST 为空。只有场景自身失败时任务为 FAILED 且 result 为空；查询成功仍使用 HTTP 200 和外层业务码 OK。
 
 #### Scenario: 前端展示部分有效结果
-- **WHEN** 本人 PPG 场景包含成功的 hr_br、spo2 和失败的 diabetes
-- **THEN** 详情返回任务 SUCCEEDED、outcome 为 PARTIALLY_SUCCEEDED，前端可从各成功成员 result 读取数值并从 diabetes 读取失败信息
+- **WHEN** 本人 PPG v2 的 hr、spo2 成功，br、diabetes 失败
+- **THEN** 任务 SUCCEEDED、outcome=PARTIALLY_SUCCEEDED，保留 `results.hr.result.hr` 与血氧；BR 失败不抹去 HR，不返回默认呼吸率
 
 #### Scenario: 前端识别全部测量失败
 - **WHEN** 场景正常汇总但所有成员失败
@@ -183,14 +183,14 @@
 - **THEN** 列表仍不加载完整 result；摘要中的 SUCCEEDED 仅表示场景处理完成，不能单独作为全部指标成功或医学有效的依据
 
 ### Requirement: 场景通过既有模型与任务接口调用
-系统 MUST 通过现有模型管理流程为两个新场景配置对应名称、发布版本和渠道选择；用户 MUST 继续使用该渠道目录返回的 modelId 创建任务、上传 requiredInputs、提交和查询详情，不增加客户端任意成员或版本选择。独立算法目录、已有任务及旧结果格式 MUST 保持，不自动修改现有渠道选择或把历史单算法结果改造成场景结构。
+系统 MUST 通过既有模型与任务接口配置统一 PPG v2 和不变的 PPG+ACC v1；用户使用目录真实 modelId 和 requiredInputs，不传任意成员或版本。独立 HR、BR 使用各自模型和单算法结果；存续的其他算法与历史结果不强制增加场景包装。此次经授权的测试环境退役 MUST 先对照验证，再清全部推理历史及依赖，退役旧融合与旧 PPG 场景 v1 版本，不保留别名；无关模型渠道选择不变。
 
 #### Scenario: 配置并调用新场景
 - **WHEN** 管理人员分别配置名称为统一PPG场景、统一PPG+ACC场景的合法场景模型并选择到目标渠道
 - **THEN** 用户可从原模型目录获得场景 modelId、版本、requiredInputs 和 isExample=false，使用原任务接口完成一次场景测量
 
 #### Scenario: 历史单算法详情不被改写
-- **WHEN** 新场景发布后用户读取旧的 HR/BR、血氧、糖尿病风险或血压任务
+- **WHEN** 场景发布后用户读取仍存续的独立 HR、BR、血氧、糖尿病或血压任务
 - **THEN** 其固定模型、版本、状态、原始结果字段和下载逻辑名保持不变，不强制增加 results 或 outcome
 
 #### Scenario: 非本人场景详情不可见

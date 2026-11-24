@@ -94,3 +94,15 @@
 #### Scenario: 有界分页
 - **WHEN** 用户以合法 offset 和不超过 100 的 limit 查询目录
 - **THEN** 系统按稳定顺序返回相应分页；非法分页被拒绝，不通过无限列表暴露全部目录
+
+### Requirement: 独立 HR BR 与统一 PPG v2 使用明确发布身份
+系统 MUST 分别配置模型 `ppg.active.offline.hr`、`ppg.active.offline.br` 各 `1.0.0`，引用 `ppg.active.offline.hr.v1`、`ppg.active.offline.br.v1`，只绑定对应 `hr`、`br` 指标；两者空参数、零制品、零必需资料。统一 PPG MUST 保留模型 `ppg.active.offline.all`，新增 `2.0.0` 引用 `ppg.active.offline.all.v2` 并绑定完整场景制品。三者 MUST 选择到五普通渠道，不选择 manager。PPG+ACC all.v1 与 BP 及无关模型配置 MUST 保持。
+
+#### Scenario: 五普通渠道选择新发布版本
+- **WHEN** 新独立 HR、BR 及统一 PPG v2 完成发布
+- **THEN** android-cn、android-intl、ios-cn、ios-intl、wxapp 分别选择 HR/BR 的 1.0.0 与 PPG 的 2.0.0，实际 ID 来自环境响应，不重复创建统一 PPG 模型
+
+#### Scenario: 受控退役旧融合及旧 PPG 版本
+- **WHEN** 新独立算法与旧融合完成对照验证，并按授权清除测试环境全部推理历史和依赖
+- **THEN** 退役旧融合模型及旧 PPG all.v1 发布版本和渠道引用，不原地改写已发布版本，不保留旧 key 兼容别名，也不改动归档材料
+

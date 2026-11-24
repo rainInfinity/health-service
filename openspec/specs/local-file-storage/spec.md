@@ -62,12 +62,16 @@
 - **THEN** 系统拒绝下载，即使物理文件仍存在也不能据此获得访问资格
 
 #### Scenario: 同名成员输出可独立下载
-- **WHEN** PPG 场景的 HR/BR、血氧和糖尿病均成功
-- **THEN** result.output_files 包含 hr_br_processed_ppg、hr_br_processed_rsp、spo2_processed_ppg、diabetes_processed_ppg，各逻辑名对应各成员本次生成的文件，不相互覆盖
+- **WHEN** PPG v2 的 hr、br、spo2、diabetes 四成员均成功
+- **THEN** result.output_files 包含 hr_processed_ppg、br_processed_rsp、spo2_processed_ppg、diabetes_processed_ppg，各对应自身本次文件，不相互覆盖
 
 #### Scenario: 失败成员没有下载能力
 - **WHEN** diabetes 失败且其他成员成功，客户端请求 diabetes_processed_ppg
 - **THEN** 下载按资源不存在处理，场景 result.output_files 不包含该逻辑名，也不回退到其他成员的 PPG
+
+#### Scenario: BR 失败保留 HR 文件
+- **WHEN** PPG v2 的 hr 成功而 br 失败
+- **THEN** 只登记 hr_processed_ppg，不登记 br_processed_rsp；HR 文件仍可按原权限下载，失败 BR 的子目录不进入正式集合
 
 ### Requirement: 文件成功响应不包装为 JSON
 系统 MUST 在授权下载成功时返回文件内容而不是统一 JSON 业务包装；认证、权限及资源错误仍遵循既有安全错误契约。开发与部署说明 MUST 明确共享文件可达性和可能遗留孤儿文件，不自动清理既有健康数据。
@@ -112,17 +116,17 @@
 ### Requirement: 正式输出保持任务目录与原文件名
 新正式结果 MUST 呈现为 `<channel>/<任务创建日期>/outputs/<task_id>/<算法原结果文件名>`；场景结果 MUST 在该任务目录中增加固定成员名子目录，呈现为 `<channel>/<任务创建日期>/outputs/<task_id>/<成员名>/<成员原结果文件名>`。日期与输入采用相同任务创建时间，结果名不附加输入 UUID。正式目录 MUST 只指向最近一次成功提交的完整结果集合，禁止跨根目录和未登记文件下载；失败成员的产物不得混入已发布场景目录。
 
-#### Scenario: HR BR 双文件结果
-- **WHEN** 独立 HR/BR 任务成功输出 PPG 与呼吸波形
-- **THEN** 同一 `outputs/<task_id>/` 下呈现 `ppg-processed.csv` 和 `rsp-processed.csv`；跨日完成不改变任务日期目录
+#### Scenario: 独立 HR 与 BR 各自单文件结果
+- **WHEN** 独立 HR 或 BR 任务成功输出自身处理波形
+- **THEN** HR 的任务目录只有自身 `ppg-processed.csv`，BR 的任务目录只有自身 `rsp-processed.csv`，逻辑名分别为 `processed_ppg/processed_rsp`；跨日完成不改变任务日期目录
 
 #### Scenario: 新成功集合替换旧集合
 - **WHEN** 同一任务已有正式发布集合，且出现被运行时合法接受的新成功集合
 - **THEN** 正式目录整组切换到新集合，读取不能获得新旧执行混合的文件集合；此规则不新增任务重提或成功任务自动重跑入口
 
 #### Scenario: PPG 场景目录保留各成员原文件
-- **WHEN** 三个 PPG 成员均成功并发布正式结果
-- **THEN** 同一任务目录中分别存在 hr_br/ppg-processed.csv、hr_br/rsp-processed.csv、spo2/ppg-processed.csv、diabetes/ppg-processed.csv，保留各原算法 CSV 表头、时间轴与数值
+- **WHEN** 四个 PPG v2 成员均成功并发布结果
+- **THEN** 同任务目录分别存在 hr/ppg-processed.csv、br/rsp-processed.csv、spo2/ppg-processed.csv、diabetes/ppg-processed.csv，保留各原表头、时间轴及数值
 
 #### Scenario: PPG ACC 场景目录
 - **WHEN** bp 成员成功并发布正式结果
@@ -147,8 +151,8 @@
 场景成员文件 MUST 属于同一任务、同一执行令牌的受控目录及该成员子目录，成员名和下载逻辑名 MUST 来自固定场景声明。系统 MUST 拒绝跨成员、跨任务、跨令牌、目录穿越及符号链接逃逸的输出；不得仅因路径位于公共任务根目录内就接受。正式集合发布和恢复 MUST 沿用已有成功事务、账号及来源渠道授权规则。
 
 #### Scenario: 成员返回其他成员文件
-- **WHEN** HR/BR 成员将 spo2 子目录文件冒充其 processed_ppg
-- **THEN** 输出被拒绝，不能登记为 HR/BR 的成功文件
+- **WHEN** hr 成员将 spo2 子目录文件冒充自身 processed_ppg
+- **THEN** 输出被拒绝，不能登记为 hr 的成功文件
 
 #### Scenario: 成员输出穿越执行目录
 - **WHEN** 成员返回 ../ 路径、其他令牌文件或指向执行目录外的符号链接

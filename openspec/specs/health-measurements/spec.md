@@ -10,7 +10,7 @@
 系统 MUST 按一个任务的一类指标生成一条统一健康记录，支持 `bloodPressure`、`heartRate`、`respirationRate`、`oxygenSaturation`、`diabetesRisk`。记录 MUST 返回稳定的 `recordId`、`taskId`、`metric`、`submittedAt`、`captureMethod`、`captureMode`、`durationMs`、`readings`、`quality`、`riskLevel`、`modelId`、`versionId`、`version`、`algorithmKey`；同一任务不同指标不得共用记录身份。
 
 #### Scenario: 同一场景产生多类记录
-- **WHEN** 一个统一 PPG 任务的 HR/BR、血氧和风险成员均成功
+- **WHEN** 统一 PPG v2 的 hr、br、spo2、diabetes 四成员均成功
 - **THEN** 产生四条记录，`recordId` 分别为 `<taskId>:heartRate`、`<taskId>:respirationRate`、`<taskId>:oxygenSaturation`、`<taskId>:diabetesRisk`，共享任务 ID，各指标身份保持稳定
 
 #### Scenario: 场景版本与成员算法不混淆
@@ -35,9 +35,9 @@
 - **WHEN** 对应正式算法成功并具有合法结果
 - **THEN** 血压返回 `sbp/dbp` 和 `mmHg`，心率返回 `hr` 和 `beats_per_minute`，呼吸率返回 `br` 和 `breaths_per_minute`，血氧返回 `spo2` 和 `percent`，风险从原结果 `prob` 返回 `diabetes_probability` 和 `ratio`
 
-#### Scenario: 心率和呼吸率共享实际质量
-- **WHEN** 同一个 `hr_br` 成员产生心率与呼吸率记录
-- **THEN** 两条记录使用该成员同一次实际质量；合法质量缺失时返回 `null`，不补默认分数或阈值
+#### Scenario: 心率和呼吸率分别使用自身质量
+- **WHEN** 独立 HR、BR 或场景 hr、br 成员分别产生记录
+- **THEN** 各记录使用自身成功结果的实际质量，缺失为 null；共享前置代码不要求两项同成同败
 
 #### Scenario: 保留风险编码而不重新分级
 - **WHEN** 返回有效糖尿病风险结果
@@ -48,15 +48,15 @@
 - **THEN** 不生成该任务的血压记录，不与其他任务的读数组合
 
 ### Requirement: 健康记录只来自已支持的真实有效结果
-系统 MUST 显式识别现有四个正式独立算法及两个统一场景的结果合同，仅为任务成功且对应结果成功有效的指标产生记录。场景 MUST 校验对应成员身份和状态，不仅检查任务顶层状态。失败、处理中、质量拒绝、示例及不支持的算法结果 MUST 不产生健康记录；不得重跑算法或改写原 `result`。
+系统 MUST 显式识别五个正式独立算法及 PPG v2、PPG+ACC v1 两个场景。HR MUST 绑定 `ppg.active.offline.hr.v1` 或 `.all.v2` 的 `hr` 成员及 `results.hr.result.hr`，BR MUST 绑定 `ppg.active.offline.br.v1` 或 `br` 成员及 `results.br.result.br`；各自检查有限速率，BR 还须位于 `[8,20]`，不得要求另一项有效。场景 MUST 校验对应成员身份、状态与合法汇总结局。旧融合、旧 PPG all.v1、失败、处理中、质量拒绝、示例及不支持算法 MUST 不产生记录，不重跑算法或改写结果。
 
 #### Scenario: 独立算法成功
-- **WHEN** HR/BR、血氧、血压或糖尿病风险的正式独立任务成功且对应载荷有效
+- **WHEN** HR、BR、血氧、血压或糖尿病的正式独立任务成功且自身载荷有效
 - **THEN** 从其权威结果生成对应记录，不要求结果具有场景包装结构
 
 #### Scenario: 场景部分成功
-- **WHEN** 统一 PPG 场景的 HR/BR 成员成功，血氧和风险成员失败
-- **THEN** 仅产生心率、呼吸率记录，不为失败成员生成零值或默认读数
+- **WHEN** 统一 PPG v2 的 hr 成功，br、spo2、diabetes 失败
+- **THEN** 只生成心率记录，BR 失败不排除有效 HR，不为失败指标生成默认读数；反向情况同样独立判断
 
 #### Scenario: 所有成员失败但任务汇总成功
 - **WHEN** 任务为 `SUCCEEDED`，场景汇总为 `ALL_FAILED`
@@ -73,9 +73,9 @@
 ### Requirement: 可选指标投影不决定健康记录是否存在
 系统 MUST 以固定算法合同下的权威结果判断读数，不得因版本未选某个可选指标投影而丢失有效健康记录。任务结果和现有指标投影的保存合同 MUST 保持不变，不为健康查询重写已发布版本配置、补写未选指标或要求用户重新检测。
 
-#### Scenario: 旧版本只投影心率
-- **WHEN** 一个有提交时间的历史任务成功产出心率和呼吸率，但版本仅选择心率投影
-- **THEN** 健康查询仍能返回心率和呼吸率记录，原指标表不被查询操作补写
+#### Scenario: 场景版本只投影心率
+- **WHEN** PPG v2 任务成功且 hr、br 各自有效，但版本只选择心率投影
+- **THEN** 仍返回心率和呼吸率记录，不补写指标；两者各依自身成员而非融合结果准入
 
 #### Scenario: 血压没有可选投影但权威结果完整
 - **WHEN** 成功血压任务有同次合法 `sbp/dbp`，但未选择这两个指标投影
