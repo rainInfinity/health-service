@@ -13,14 +13,14 @@ def test_foreign_output_is_rejected_without_deleting_foreign_file(
     tmp_path, scene_case, scene_factory, foreign_kind,
 ):
     """真实血氧输出冒用其他成员、任务或令牌文件时只清理自身目录。"""
-    original = PPG_SCENE.members[1].definition.resource_factory
+    original = PPG_SCENE.members[2].definition.resource_factory
     if foreign_kind in ("task", "token", "traversal"):
         parent = tmp_path / ("another-task/token" if foreign_kind == "task" else "another-token") / "spo2"
         parent.mkdir(parents=True)
         foreign = parent / "ppg-processed.csv"
         foreign.write_bytes(b"private-foreign-bytes")
     else:
-        foreign = tmp_path / "execution" / "hr_br" / "ppg-processed.csv"
+        foreign = tmp_path / "execution" / "hr" / "ppg-processed.csv"
 
     def create(resources):
         """保留真实成员计算，仅破坏返回文件归属。"""
@@ -31,7 +31,7 @@ def test_foreign_output_is_rejected_without_deleting_foreign_file(
             output = executor(value)
             path = foreign
             if foreign_kind == "traversal":
-                path = value.output_dir / ".." / "hr_br" / "ppg-processed.csv"
+                path = value.output_dir / ".." / "hr" / "ppg-processed.csv"
             return replace(output, output_files={"processed_ppg": path})
 
         return substitute
@@ -50,7 +50,7 @@ def test_foreign_output_is_rejected_without_deleting_foreign_file(
 
 def test_unregistered_member_residue_is_not_left_in_publishable_tree(tmp_path, scene_case, scene_factory):
     """未登记文件不能随整目录发布；该成员转失败并删除本次全部残留。"""
-    original = PPG_SCENE.members[1].definition.resource_factory
+    original = PPG_SCENE.members[2].definition.resource_factory
 
     def create(resources):
         """在真实成功后写入未声明残留。"""
@@ -80,7 +80,7 @@ def test_unprovable_failure_cleanup_rejects_entire_scene(
     tmp_path, scene_case, scene_factory, monkeypatch, kind,
 ):
     """清理不能证明隔离时不得假装成员失败后继续提交场景成功。"""
-    original = PPG_SCENE.members[1].definition.resource_factory
+    original = PPG_SCENE.members[2].definition.resource_factory
     foreign = tmp_path / "foreign"
     foreign.mkdir()
     secret = foreign / "secret.csv"
@@ -117,25 +117,25 @@ def test_unprovable_failure_cleanup_rejects_entire_scene(
 
 def test_preexisting_execution_content_is_not_reused_or_deleted(tmp_path, scene_case):
     """场景只拥有本次新建子目录，不能覆盖或清理先前执行的产物。"""
-    from health_inference import PPG_ACTIVE_OFFLINE_ALL_V1
+    from health_inference import PPG_ACTIVE_OFFLINE_ALL_V2
 
     source = scene_case.input(tmp_path / "execution")
     previous = source.output_dir / "previous.csv"
     previous.write_bytes(b"previous-execution")
     with pytest.raises(InferenceError) as error:
-        PPG_ACTIVE_OFFLINE_ALL_V1.create_runtime(scene_case.resources()).run(source)
+        PPG_ACTIVE_OFFLINE_ALL_V2.create_runtime(scene_case.resources()).run(source)
     assert error.value.code == "RESULT.INVALID_OUTPUT"
     assert previous.read_bytes() == b"previous-execution"
 
 
 def test_symlink_execution_root_is_never_followed(tmp_path, scene_case):
     """任务根目录即使指向可访问目录，也不能借符号链接复用其他执行。"""
-    from health_inference import PPG_ACTIVE_OFFLINE_ALL_V1
+    from health_inference import PPG_ACTIVE_OFFLINE_ALL_V2
 
     source = scene_case.input(tmp_path / "real-execution")
     link = tmp_path / "linked-execution"
     link.symlink_to(source.output_dir, target_is_directory=True)
     with pytest.raises(InferenceError) as error:
-        PPG_ACTIVE_OFFLINE_ALL_V1.create_runtime(scene_case.resources()).run(replace(source, output_dir=link))
+        PPG_ACTIVE_OFFLINE_ALL_V2.create_runtime(scene_case.resources()).run(replace(source, output_dir=link))
     assert error.value.code == "RESULT.INVALID_OUTPUT"
     assert list(source.output_dir.iterdir()) == []

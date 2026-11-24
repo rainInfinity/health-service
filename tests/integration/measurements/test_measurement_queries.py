@@ -21,7 +21,7 @@ pytestmark = pytest.mark.django_db
 def test_all_supported_sources_keep_original_values_and_frozen_version(
     measurement_tasks, scene_payload, metric, scene,
 ):
-    """四个独立算法和两个场景都按固定合同返回原值及实际成员来源。"""
+    """五个独立算法和两个场景都按固定合同返回原值及实际成员来源。"""
     definition = MEASUREMENT_DEFINITIONS[metric]
     source = definition.sources[1 if scene else 0]
     full = scene_payload(bp=metric == "bloodPressure")
@@ -59,12 +59,13 @@ def test_all_supported_sources_keep_original_values_and_frozen_version(
     assert "PRIVATE" not in repr(record.model_dump())
 
 
-def test_hr_br_share_quality_and_old_unknown_capture_without_projection(
+def test_rates_keep_own_quality_and_old_unknown_capture_without_projection(
     measurement_tasks, scene_payload,
 ):
-    """旧结果没有新增属性或投影也完整可读，HR/BR 使用同一次质量。"""
-    payload = scene_payload()["results"]["hr_br"]["result"]
-    task = measurement_tasks(payload=payload)
+    """场景没有新增采集属性或投影也可读，两成员各取自己的质量对象。"""
+    payload = scene_payload()
+    payload["results"]["br"]["result"]["quality"]["score"] = 91.25
+    task = measurement_tasks("ppg.active.offline.all.v2", payload)
     before = deepcopy(task.result_payload)
     hr = latest_user_measurement(
         user_id=task.user_id, channel_label=task.channel.label, metric="heartRate",
@@ -74,17 +75,21 @@ def test_hr_br_share_quality_and_old_unknown_capture_without_projection(
     )
     assert hr.task_id == br.task_id == task.pk
     assert hr.record_id != br.record_id
-    assert hr.quality == br.quality
+    assert hr.quality.score == payload["results"]["hr"]["result"]["quality"]["score"]
+    assert br.quality.score == 91.25
+    assert hr.quality != br.quality
     assert hr.capture_method is hr.capture_mode is hr.duration_ms is None
-    assert br.readings[0].value == payload["br"]
+    assert br.readings[0].value == payload["results"]["br"]["result"]["br"]
     task.refresh_from_db()
     assert task.result_payload == before
     assert not TaskMetric.objects.filter(task=task).exists()
 
 
-def test_partial_metric_projection_is_not_a_query_gate_and_is_not_backfilled(measurement_tasks):
+def test_partial_metric_projection_is_not_a_query_gate_and_is_not_backfilled(measurement_tasks, scene_payload):
     """只投影 HR 的历史版本仍返回 BR，不补写可选投影或原结果。"""
-    task = measurement_tasks(payload={"hr": 79.0, "br": 17.0})
+    payload = scene_payload()
+    payload["results"]["hr"]["result"]["hr"] = 79.0
+    task = measurement_tasks("ppg.active.offline.all.v2", payload)
     metric = MetricDefinition.objects.create(
         code="hr", value_type=MetricDefinition.ValueTypeChoices.NUMBER,
     )
@@ -98,7 +103,7 @@ def test_partial_metric_projection_is_not_a_query_gate_and_is_not_backfilled(mea
     assert list(TaskMetric.objects.filter(task=task).values()) == before
     assert TaskMetric.objects.get(pk=projection.pk).numeric_value == 79.0
     task.refresh_from_db()
-    assert task.result_payload == {"hr": 79.0, "br": 17.0}
+    assert task.result_payload == payload
 
 
 def test_unprojected_blood_pressure_is_one_paired_record(measurement_tasks):
@@ -198,7 +203,7 @@ def test_historical_fixed_version_does_not_require_current_selection(measurement
 def test_queries_select_only_public_scalars_and_latest_does_not_count(measurement_tasks):
     """页查询只用两条只读 SQL，latest 只用一条，不加载完整结果与私有字段。"""
     task = measurement_tasks(payload={
-        "hr": 79.0, "br": 17.0, "waveform": [1.0] * 1000,
+        "hr": 79.0, "waveform": [1.0] * 1000,
         "quality": {"score": 88.5, "threshold": 70, "private": "PRIVATE"},
         "output_files": {"ppg": "PRIVATE-PATH"},
     })

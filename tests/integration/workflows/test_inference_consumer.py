@@ -1267,18 +1267,17 @@ def _create_ppg_v1_input_failure_task(content: str) -> tuple[Task, str]:
     )
     model = create_model(
         code=f"consumer-ppg-v1-{uuid4().hex}",
-        name="PPG HR/BR v1",
+        name="PPG HR v1",
         description=None,
     )
     draft = create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="ppg.active.offline.hr_br.v1",
+        algorithm_key="ppg.active.offline.hr.v1",
         params=None,
     )
     definitions = (
         ("hr", "beats_per_minute"),
-        ("br", "breaths_per_minute"),
     )
     for code, unit in definitions:
         create_metric_definition(
@@ -1317,7 +1316,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     monkeypatch,
     capsys,
 ):
-    """创建日与执行日跨日后，经 HTTP 上传正式 HR/BR 输入并下载结果。"""
+    """创建日与执行日跨日后，经 HTTP 上传正式 HR 输入并下载结果。"""
     redis_client, stream, group = inference_stream
     historical_ppg_bytes = synthetic_ppg_csv(heart_rate_hz=1.0).encode("utf-8")
     selected_ppg_bytes = synthetic_ppg_csv(heart_rate_hz=1.2).encode("utf-8")
@@ -1352,7 +1351,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
         }
         model_response = await client.post(
             "/api/v1/manager/models",
-            data=json.dumps({"code": f"ppg-v1-{uuid4().hex}", "name": "PPG HR/BR v1"}),
+            data=json.dumps({"code": f"ppg-v1-{uuid4().hex}", "name": "PPG HR v1"}),
             content_type="application/json",
             headers=manager_headers,
         )
@@ -1363,7 +1362,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
             data=json.dumps(
                 {
                     "version": "1.0",
-                    "algorithmKey": "ppg.active.offline.hr_br.v1",
+                    "algorithmKey": "ppg.active.offline.hr.v1",
                     "params": None,
                 }
             ),
@@ -1375,7 +1374,6 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
         metric_responses = []
         for code, unit in (
             ("hr", "beats_per_minute"),
-            ("br", "breaths_per_minute"),
         ):
             metric_responses.append(
                 await client.post(
@@ -1394,7 +1392,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
             )
         metrics_response = await client.put(
             f"/api/v1/manager/model-versions/{version_id}/metrics",
-            data=json.dumps({"metricCodes": ["hr", "br"]}),
+            data=json.dumps({"metricCodes": ["hr"]}),
             content_type="application/json",
             headers=manager_headers,
         )
@@ -1541,7 +1539,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
         assert not published_output_dir.is_symlink()
 
         async def query_and_download():
-            """用任务所有者令牌读取详情及两个真实流式输出。"""
+            """用任务所有者令牌读取真实 PPG 输出，未登记 RSP 下载必须拒绝。"""
             client = AsyncClient()
             detail = await client.get(
                 f"/api/v1/ios-cn/tasks/{task_id}",
@@ -1606,10 +1604,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
                 return b"".join(content)
 
             historical_body = await read_body(historical_response)
-            bodies = (
-                await read_body(ppg_response),
-                await read_body(rsp_response),
-            )
+            bodies = (await read_body(ppg_response),)
             await sync_to_async(connections.close_all, thread_sensitive=True)()
             return (
                 detail,
@@ -1647,7 +1642,7 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     timestamp_part = created_local.strftime("%Y%m%d_%H%M%S")
     input_prefix = (
         f"ios-cn/{date_part}/{timestamp_part}-{task.pk}-{task.user_id}-"
-        "ppg.active.offline.hr_br.v1-ppg-"
+        "ppg.active.offline.hr.v1-ppg-"
     )
     for input_record, expected_bytes in (
         (historical_input, historical_ppg_bytes),
@@ -1666,14 +1661,13 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
             == expected_bytes
         )
     output_keys = task.result_payload["output_files"]
-    assert set(output_keys) == {"processed_ppg", "processed_rsp"}
+    assert set(output_keys) == {"processed_ppg"}
     output_paths = {
         logical_name: storage.resolve_file(StorageArea.TASK_DATA, storage_key)
         for logical_name, storage_key in output_keys.items()
     }
     assert {path.name for path in output_paths.values()} == {
         "ppg-processed.csv",
-        "rsp-processed.csv",
     }
     execution_dirs = {path.parent for path in output_paths.values()}
     assert len(execution_dirs) == 1
@@ -1689,14 +1683,12 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     assert published_dir.resolve() == execution_dir
     assert {path.name for path in published_dir.iterdir()} == {
         "ppg-processed.csv",
-        "rsp-processed.csv",
     }
     assert output_paths["processed_ppg"].read_bytes() == output_bodies[0]
-    assert output_paths["processed_rsp"].read_bytes() == output_bodies[1]
     assert historical_input_status == 200
     assert historical_input_body == historical_ppg_bytes
     assert task.result_payload["hr"] == pytest.approx(72.0, abs=0.2)
-    assert math.isfinite(task.result_payload["br"])
+    assert "br" not in task.result_payload
     assert task.result_payload["quality"]["score"] >= 70.0
     assert task.result_payload["quality"]["threshold"] == 70
     assert detail.status_code == 200
@@ -1707,9 +1699,8 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     assert detail_data["status"] == "SUCCEEDED"
     result = detail_data["result"]
     assert result["hr"] == task.result_payload["hr"]
-    assert result["br"] == task.result_payload["br"]
     assert result["quality"] == task.result_payload["quality"]
-    assert set(result["output_files"]) == {"processed_ppg", "processed_rsp"}
+    assert set(result["output_files"]) == {"processed_ppg"}
     assert str(tmp_path) not in json.dumps(result)
 
     projected_metrics = {
@@ -1718,26 +1709,16 @@ def test_official_ppg_v1_http_task_executes_and_downloads_outputs(
     }
     assert projected_metrics == {
         "hr": result["hr"],
-        "br": result["br"],
     }
-    assert (ppg_status, rsp_status) == (200, 200)
+    assert (ppg_status, rsp_status) == (200, 404)
     assert unauthorized_statuses == (404, 404, 404, 404)
     ppg_rows = list(csv.DictReader(StringIO(output_bodies[0].decode("utf-8"))))
-    rsp_rows = list(csv.DictReader(StringIO(output_bodies[1].decode("utf-8"))))
-    assert len(ppg_rows) == len(rsp_rows) == 1800
+    assert len(ppg_rows) == 1800
     assert list(ppg_rows[0]) == ["timestamp", "ppg"]
-    assert list(rsp_rows[0]) == ["timestamp", "rsp"]
     expected_timestamps = [index * 1000.0 / 30.0 for index in range(1800)]
-    for ppg_row, rsp_row, timestamp in zip(
-        ppg_rows,
-        rsp_rows,
-        expected_timestamps,
-        strict=True,
-    ):
+    for ppg_row, timestamp in zip(ppg_rows, expected_timestamps, strict=True):
         assert float(ppg_row["timestamp"]) == pytest.approx(timestamp)
-        assert float(rsp_row["timestamp"]) == pytest.approx(timestamp)
         assert math.isfinite(float(ppg_row["ppg"]))
-        assert math.isfinite(float(rsp_row["rsp"]))
     assert redis_client.xpending(stream, group)["pending"] == 0
 
 
@@ -1754,7 +1735,7 @@ def test_official_ppg_v1_keeps_fixed_versions_and_metric_projections_isolated(
     )
     model = create_model(
         code=f"consumer-ppg-version-{uuid4().hex}",
-        name="PPG HR/BR version isolation",
+        name="PPG HR version isolation",
         description=None,
     )
     metric_definitions = (
@@ -1774,7 +1755,7 @@ def test_official_ppg_v1_keeps_fixed_versions_and_metric_projections_isolated(
         draft = create_model_version(
             model_id=model.model_id,
             version=version_name,
-            algorithm_key="ppg.active.offline.hr_br.v1",
+            algorithm_key=f"ppg.active.offline.{metric_code}.v1",
             params=None,
         )
         set_model_version_metrics(
@@ -1852,9 +1833,12 @@ def test_official_ppg_v1_keeps_fixed_versions_and_metric_projections_isolated(
     assert first_task.model_version_id == versions["1.0"].version_id
     assert second_task.model_version_id == versions["2.0"].version_id
     assert first_task.result_payload["hr"] == pytest.approx(72.0, abs=0.2)
-    assert second_task.result_payload["hr"] == pytest.approx(90.0, abs=0.2)
+    assert "br" not in first_task.result_payload
+    assert "hr" not in second_task.result_payload
+    assert math.isfinite(second_task.result_payload["br"])
+    assert set(first_task.result_payload["output_files"]) == {"processed_ppg"}
+    assert set(second_task.result_payload["output_files"]) == {"processed_rsp"}
     for task in (first_task, second_task):
-        assert math.isfinite(task.result_payload["br"])
         assert task.result_payload["quality"]["score"] >= 70.0
         assert task.result_payload["quality"]["threshold"] == 70
 
@@ -1876,7 +1860,7 @@ def test_formal_ppg_quality_rejection_has_no_output_or_metrics(
     tmp_path,
     inference_stream,
 ):
-    """真实 HR/BR v1 质量拒绝不写成功结果、指标或处理文件。"""
+    """真实 HR v1 质量拒绝不写成功结果、指标或处理文件。"""
     redis_client, stream, group = inference_stream
     content = synthetic_ppg_csv(heart_rate_hz=1.2, noise_amplitude=30.0)
     with override_settings(

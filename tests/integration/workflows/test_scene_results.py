@@ -39,7 +39,7 @@ def test_all_failed_commits_nonempty_success_summary_without_metrics(scene_envir
     task.refresh_from_db()
     assert task.status == Task.StatusChoices.SUCCEEDED
     assert task.result_payload["outcome"] == "ALL_FAILED"
-    assert set(task.result_payload["results"]) == {"hr_br", "spo2", "diabetes"}
+    assert set(task.result_payload["results"]) == {"hr", "br", "spo2", "diabetes"}
     for member in task.result_payload["results"].values():
         assert member["status"] == "FAILED"
         assert member["result"] is None
@@ -70,13 +70,13 @@ def test_mixed_summary_projects_only_successful_and_selected_metrics(scene_envir
     assert task.status == Task.StatusChoices.SUCCEEDED
     assert task.result_payload["outcome"] == "PARTIALLY_SUCCEEDED"
     members = task.result_payload["results"]
-    assert members["hr_br"]["status"] == members["spo2"]["status"] == "SUCCEEDED"
+    assert members["hr"]["status"] == members["br"]["status"] == members["spo2"]["status"] == "SUCCEEDED"
     assert members["diabetes"]["status"] == "FAILED"
     assert members["diabetes"]["result"] is None
     assert {
         metric.metric.code: metric.numeric_value
         for metric in TaskMetric.objects.filter(task=task).select_related("metric")
-    } == {"hr": members["hr_br"]["result"]["hr"]}
+    } == {"hr": members["hr"]["result"]["hr"]}
     assert "PRIVATE" not in str(task.result_payload)
     assert task.failure_code is task.failure_message is task.failure_detail is None
 

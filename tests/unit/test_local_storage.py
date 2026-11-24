@@ -46,7 +46,7 @@ def _save_task_input(
     task_id: int = 42,
     user_id: int = 7,
     channel: str = "ios-cn",
-    algorithm_key: str = "ppg.active.offline.hr_br.v1",
+    algorithm_key: str = "ppg.active.offline.hr.v1",
     logical_name: str = "ppg",
     max_bytes: int = 100,
 ) -> StoredFile:

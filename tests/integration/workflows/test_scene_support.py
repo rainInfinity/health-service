@@ -41,7 +41,7 @@ from tests.integration.workflows.test_spo2_inference_consumer import (
 
 CHANNEL = "ios-cn"
 PASSWORD = "Scene-workflow-test-2026!"
-PPG_SCENE = "ppg.active.offline.all.v1"
+PPG_SCENE = "ppg.active.offline.all.v2"
 BP_SCENE = "ppg_acc.active.offline.all.v1"
 
 

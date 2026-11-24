@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .algorithms.ppg_acc_active_offline_bp_v1 import PPG_ACC_ACTIVE_OFFLINE_BP_V1
 from .algorithms.ppg_active_offline_diabetes_v1 import PPG_ACTIVE_OFFLINE_DIABETES_V1
-from .algorithms.ppg_active_offline_hr_br_v1 import PPG_ACTIVE_OFFLINE_HR_BR_V1
+from .algorithms.ppg_active_offline_hr_v1 import PPG_ACTIVE_OFFLINE_HR_V1
+from .algorithms.ppg_active_offline_br_v1 import PPG_ACTIVE_OFFLINE_BR_V1
 from .algorithms.ppg_active_offline_spo2_v1 import PPG_ACTIVE_OFFLINE_SPO2_V1
 from .exceptions import InferenceError
 from .failures import is_safe_failure, safe_failure_fields
@@ -341,8 +342,9 @@ class OfflineScene:
                 raise _invalid_output()
 
 
-PPG_SCENE = OfflineScene("ppg.active.offline.all.v1", (
-    SceneMember("hr_br", PPG_ACTIVE_OFFLINE_HR_BR_V1),
+PPG_SCENE = OfflineScene("ppg.active.offline.all.v2", (
+    SceneMember("hr", PPG_ACTIVE_OFFLINE_HR_V1),
+    SceneMember("br", PPG_ACTIVE_OFFLINE_BR_V1),
     SceneMember("spo2", PPG_ACTIVE_OFFLINE_SPO2_V1),
     SceneMember("diabetes", PPG_ACTIVE_OFFLINE_DIABETES_V1),
 ))

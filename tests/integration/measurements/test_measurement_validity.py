@@ -75,7 +75,7 @@ def test_probability_and_integer_risk_code_are_required_before_pagination(
     full = scene_payload()
     result = full["results"]["diabetes"]["result"]
     result.update(patch)
-    algorithm = "ppg.active.offline.all.v1" if scene else "ppg.active.offline.diabetes.v1"
+    algorithm = "ppg.active.offline.all.v2" if scene else "ppg.active.offline.diabetes.v1"
     measurement_tasks(algorithm, full if scene else result)
     assert _query(measurement_tasks, "diabetesRisk") == (0, ())
 
@@ -108,7 +108,7 @@ def test_risk_preserves_probability_edges_and_never_reclassifies(
 @pytest.mark.parametrize(
     "metric,algorithm,payload",
     [
-        ("respirationRate", "ppg.active.offline.hr_br.v1", {"br": 20.0001}),
+        ("respirationRate", "ppg.active.offline.br.v1", {"br": 20.0001}),
         ("oxygenSaturation", "ppg.active.offline.spo2.v1", {"spo2": 89.999}),
         ("oxygenSaturation", "ppg.active.offline.spo2.v1", {"spo2": 100.001}),
     ],
@@ -133,9 +133,9 @@ def test_respiration_range_applies_to_history_and_latest(
 ):
     """独立及场景读数仅在 [8, 20] 内进入历史和最新结果，不改写原值。"""
     full = scene_payload()
-    result = full["results"]["hr_br"]["result"]
+    result = full["results"]["br"]["result"]
     result["br"] = br
-    algorithm = "ppg.active.offline.all.v1" if scene else "ppg.active.offline.hr_br.v1"
+    algorithm = "ppg.active.offline.all.v2" if scene else "ppg.active.offline.br.v1"
     payload = full if scene else result
     task = measurement_tasks(algorithm, payload)
     total, records = _query(measurement_tasks, "respirationRate")
@@ -165,19 +165,19 @@ def test_respiration_range_applies_to_history_and_latest(
     ],
 )
 @pytest.mark.parametrize("scene", [False, True])
+@pytest.mark.parametrize("metric,member", [("heartRate", "hr"), ("respirationRate", "br")])
 def test_invalid_actual_quality_returns_null_without_losing_valid_readings(
-    measurement_tasks, scene_payload, quality, scene,
+    measurement_tasks, scene_payload, quality, scene, metric, member,
 ):
     """质量非法只使白名单为空，不制造默认值，也不使合法页面缩短。"""
     full = scene_payload()
-    full["results"]["hr_br"]["result"]["quality"] = quality
-    algorithm = "ppg.active.offline.all.v1" if scene else "ppg.active.offline.hr_br.v1"
-    task = measurement_tasks(algorithm, full if scene else full["results"]["hr_br"]["result"])
-    for metric in ("heartRate", "respirationRate"):
-        total, records = _query(measurement_tasks, metric)
-        assert total == len(records) == 1
-        assert records[0].task_id == task.pk
-        assert records[0].quality is None
+    full["results"][member]["result"]["quality"] = quality
+    algorithm = "ppg.active.offline.all.v2" if scene else f"ppg.active.offline.{member}.v1"
+    task = measurement_tasks(algorithm, full if scene else full["results"][member]["result"])
+    total, records = _query(measurement_tasks, metric)
+    assert total == len(records) == 1
+    assert records[0].task_id == task.pk
+    assert records[0].quality is None
 
 
 @pytest.mark.parametrize("score", [70, 70.0, 88.65866718458382, 120.125])
@@ -200,20 +200,20 @@ def test_partial_scene_only_returns_successful_members_and_latest_falls_back(
     measurement_tasks, scene_payload,
 ):
     """新场景部分成功仅更新成功指标，其余指标独立回退旧有效任务。"""
-    old = measurement_tasks("ppg.active.offline.all.v1", scene_payload())
+    old = measurement_tasks("ppg.active.offline.all.v2", scene_payload())
     mixed = scene_payload()
     mixed["outcome"] = "PARTIALLY_SUCCEEDED"
-    for member in ("spo2", "diabetes"):
+    for member in ("br", "spo2", "diabetes"):
         mixed["results"][member].update(
             status="FAILED", result=None, failureCode="INFERENCE.QUALITY_REJECTED",
             failureMessage="信号质量不足", qualityFailure=None,
         )
     newer = measurement_tasks(
-        "ppg.active.offline.all.v1", mixed,
+        "ppg.active.offline.all.v2", mixed,
         submitted_at=measurement_tasks.submitted_at + timedelta(seconds=1),
     )
     for metric, count, latest_task in (
-        ("heartRate", 2, newer), ("respirationRate", 2, newer),
+        ("heartRate", 2, newer), ("respirationRate", 1, old),
         ("oxygenSaturation", 1, old), ("diabetesRisk", 1, old),
     ):
         total, records = _query(measurement_tasks, metric)
@@ -236,7 +236,7 @@ def test_all_failed_scene_never_yields_records_even_with_contradictory_member(
     if not keep_success_member:
         for member in full["results"].values():
             member.update(status="FAILED", result=None)
-    algorithm = "ppg_acc.active.offline.all.v1" if bp else "ppg.active.offline.all.v1"
+    algorithm = "ppg_acc.active.offline.all.v1" if bp else "ppg.active.offline.all.v2"
     task = measurement_tasks(algorithm, full)
     for metric in METRICS:
         assert _query(measurement_tasks, metric) == (0, ())
@@ -278,14 +278,17 @@ def test_non_successful_task_never_yields_records(measurement_tasks, status):
 @pytest.mark.parametrize("bp", [False, True])
 def test_missing_submitted_at_excludes_successful_history(measurement_tasks, scene_payload, bp):
     """无提交时间不回退完成或创建时间，也不推导采集属性。"""
-    algorithm = "ppg_acc.active.offline.all.v1" if bp else "ppg.active.offline.all.v1"
+    algorithm = "ppg_acc.active.offline.all.v1" if bp else "ppg.active.offline.all.v2"
     measurement_tasks(algorithm, scene_payload(bp=bp), submitted_at=None)
     for metric in METRICS:
         assert _query(measurement_tasks, metric) == (0, ())
 
 
 @pytest.mark.parametrize(
-    "algorithm", ["example.completed.v1", "test.integration.completed", "removed.unknown.v1"],
+    "algorithm", [
+        "example.completed.v1", "test.integration.completed", "removed.unknown.v1",
+        "ppg.active.offline.hr_br.v1", "ppg.active.offline.all.v1",
+    ],
 )
 def test_unknown_and_example_algorithms_do_not_spoof_supported_payloads(
     measurement_tasks, scene_payload, algorithm,

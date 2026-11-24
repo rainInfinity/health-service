@@ -26,18 +26,20 @@ def test_retired_example_key_is_not_registered():
 def test_registry_rejects_duplicate_builtin_algorithm():
     """验证同一算法定义不能通过重复注册改变现有契约。"""
     with pytest.raises(ValueError):
-        register_algorithm(get_algorithm("ppg.active.offline.hr_br.v1"))
+        register_algorithm(get_algorithm("ppg.active.offline.hr.v1"))
 
 
 def test_registered_algorithms_expose_immutable_file_extensions():
     """正式算法的文件、制品和糖尿病/血压指标契约与逻辑名一致。"""
-    hr_br = get_algorithm("ppg.active.offline.hr_br.v1")
+    hr = get_algorithm("ppg.active.offline.hr.v1")
+    br = get_algorithm("ppg.active.offline.br.v1")
     spo2 = get_algorithm("ppg.active.offline.spo2.v1")
     bp = get_algorithm("ppg_acc.active.offline.bp.v1")
     diabetes = get_algorithm("ppg.active.offline.diabetes.v1")
 
-    assert dict(hr_br.input_extensions) == {"ppg": frozenset({"csv"})}
-    assert dict(hr_br.artifact_extensions) == {}
+    for definition in (hr, br):
+        assert dict(definition.input_extensions) == {"ppg": frozenset({"csv"})}
+        assert dict(definition.artifact_extensions) == {}
     assert dict(spo2.input_extensions) == {"ppg": frozenset({"csv"})}
     assert dict(spo2.artifact_extensions) == {
         "spo2": frozenset({"onnx"}),
@@ -90,9 +92,9 @@ def test_diabetes_rejects_non_empty_parameters_and_incomplete_resources():
 @pytest.mark.parametrize(
     ("base_key", "field", "extensions"),
     [
-        ("ppg.active.offline.hr_br.v1", "input_extensions", {}),
+        ("ppg.active.offline.hr.v1", "input_extensions", {}),
         (
-            "ppg.active.offline.hr_br.v1",
+            "ppg.active.offline.hr.v1",
             "input_extensions",
             {"other": frozenset({"csv"})},
         ),
@@ -115,7 +117,7 @@ def test_diabetes_rejects_non_empty_parameters_and_incomplete_resources():
             },
         ),
         (
-            "ppg.active.offline.hr_br.v1",
+            "ppg.active.offline.hr.v1",
             "input_extensions",
             {"ppg": frozenset({".csv"})},
         ),

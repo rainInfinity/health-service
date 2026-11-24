@@ -9,7 +9,7 @@ from health_inference import (
     QualityRejection,
     QualityRejectionReason,
 )
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.build_output import valid_output
+from health_inference.algorithms.ppg_active_offline_br_v1.build_output import valid_output
 from health_inference.exceptions import InferenceError, InputError, InputErrorReason
 from health_inference.failures import is_safe_failure, safe_failure_fields
 from health_inference.types import InferenceOutput
@@ -73,11 +73,11 @@ def test_real_parser_errors_keep_classification_without_path(tmp_path, content, 
 
 
 def test_non_finite_prediction_stays_a_result_failure():
-    """HR/BR 单项非法时整份结果被拒绝，不降级成输入或质量失败。"""
+    """独立 BR 非法时结果被拒绝，不降级成输入或质量失败。"""
     output = InferenceOutput(
-        payload={"hr": 72.0, "br": float("inf"), "quality": {"score": 85.0, "threshold": 70}},
-        metrics={"hr": 72.0, "br": float("inf")},
-        output_files={"processed_ppg": Path("ppg-processed.csv"), "processed_rsp": Path("rsp-processed.csv")},
+        payload={"br": float("inf"), "quality": {"score": 85.0, "threshold": 70}},
+        metrics={"br": float("inf")},
+        output_files={"processed_rsp": Path("rsp-processed.csv")},
     )
     with pytest.raises(InferenceError) as error:
         valid_output(output)

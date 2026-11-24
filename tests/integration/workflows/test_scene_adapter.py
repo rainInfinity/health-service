@@ -97,7 +97,7 @@ def test_scene_versions_a_b_a_use_frozen_inputs_profiles_and_own_models(scene_en
     assert outputs[0].payload["results"]["diabetes"]["result"]["prob"] < 0.5
     assert outputs[1].payload["results"]["diabetes"]["result"]["prob"] > 0.5
     assert outputs[2].payload["results"]["diabetes"]["result"]["prob"] < 0.5
-    assert outputs[0].payload["results"]["hr_br"]["result"] != outputs[2].payload["results"]["hr_br"]["result"]
+    assert outputs[0].payload["results"]["hr"]["result"] != outputs[2].payload["results"]["hr"]["result"]
     assert set(outputs[0].output_files.values()).isdisjoint(outputs[2].output_files.values())
 
 
@@ -122,7 +122,7 @@ def test_member_initialization_failure_is_isolated_and_new_task_recovers(
     first_token, first_result = prepare_scene_result(first)
     assert first_result.payload["outcome"] == "PARTIALLY_SUCCEEDED"
     members = first_result.payload["results"]
-    assert members["hr_br"]["status"] == members["spo2"]["status"] == "SUCCEEDED"
+    assert members["hr"]["status"] == members["br"]["status"] == members["spo2"]["status"] == "SUCCEEDED"
     assert members["diabetes"]["status"] == "FAILED"
     assert members["diabetes"]["failureCode"] == "INFERENCE.INVALID_ARTIFACT"
     assert members["diabetes"]["result"] is None
@@ -203,7 +203,7 @@ def test_scene_publication_remains_strict(scene_environment, invalid_case):
     elif invalid_case == "incomplete":
         ModelArtifact.objects.filter(model_version_id=version.version_id, logical_name="diabetes").delete()
     else:
-        ModelVersion.objects.filter(pk=version.version_id).update(params={"members": ["hr_br"]})
+        ModelVersion.objects.filter(pk=version.version_id).update(params={"members": ["hr"]})
     with pytest.raises(CatalogConfigurationInvalid):
         publish_model_version(version_id=version.version_id)
     assert ModelVersion.objects.get(pk=version.version_id).published_at is None

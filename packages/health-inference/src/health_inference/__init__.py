@@ -3,9 +3,10 @@
 from .algorithms import (
     PPG_ACC_ACTIVE_OFFLINE_ALL_V1,
     PPG_ACC_ACTIVE_OFFLINE_BP_V1,
-    PPG_ACTIVE_OFFLINE_ALL_V1,
+    PPG_ACTIVE_OFFLINE_ALL_V2,
+    PPG_ACTIVE_OFFLINE_BR_V1,
     PPG_ACTIVE_OFFLINE_DIABETES_V1,
-    PPG_ACTIVE_OFFLINE_HR_BR_V1,
+    PPG_ACTIVE_OFFLINE_HR_V1,
     PPG_ACTIVE_OFFLINE_SPO2_V1,
 )
 from .exceptions import InferenceError, QualityRejectedError, UnknownAlgorithmError
@@ -22,10 +23,11 @@ from .types import (
 
 __all__ = [
     "PPG_ACC_ACTIVE_OFFLINE_ALL_V1",
-    "PPG_ACTIVE_OFFLINE_ALL_V1",
+    "PPG_ACTIVE_OFFLINE_ALL_V2",
+    "PPG_ACTIVE_OFFLINE_BR_V1",
     "PPG_ACC_ACTIVE_OFFLINE_BP_V1",
     "PPG_ACTIVE_OFFLINE_DIABETES_V1",
-    "PPG_ACTIVE_OFFLINE_HR_BR_V1",
+    "PPG_ACTIVE_OFFLINE_HR_V1",
     "PPG_ACTIVE_OFFLINE_SPO2_V1",
     "AlgorithmDefinition",
     "AlgorithmRuntime",

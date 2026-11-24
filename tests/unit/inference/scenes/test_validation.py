@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 from health_inference import (
-    PPG_ACTIVE_OFFLINE_ALL_V1,
+    PPG_ACTIVE_OFFLINE_ALL_V2,
     LowScoreDetails,
     QualityRejectedError,
     QualityRejection,
@@ -18,7 +18,7 @@ from health_inference.scenes import PPG_SCENE, OfflineScene, SceneMember
 
 def _damage(output, kind):
     """在合法真实输出副本上破坏一个独立不变量。"""
-    result = output.payload["results"]["hr_br"]
+    result = output.payload["results"]["hr"]
     if kind == "missing_member":
         del output.payload["results"]["diabetes"]
     elif kind == "extra_member":
@@ -34,7 +34,7 @@ def _damage(output, kind):
     elif kind == "successful_failure":
         result["failureCode"] = "INFERENCE.EXECUTION_ERROR"
     elif kind == "invalid_br":
-        result["result"]["br"] = math.inf
+        output.payload["results"]["br"]["result"]["br"] = math.inf
     elif kind == "inconsistent_metric":
         output.metrics["hr"] += 1.0
     elif kind == "extra_metric":
@@ -46,11 +46,11 @@ def _damage(output, kind):
     elif kind == "nested_files":
         result["result"]["output_files"] = {"private": "/private/path"}
     elif kind == "extra_file":
-        output.output_files["unknown_processed_ppg"] = output.output_files["hr_br_processed_ppg"]
+        output.output_files["unknown_processed_ppg"] = output.output_files["hr_processed_ppg"]
     elif kind == "missing_file":
-        del output.output_files["hr_br_processed_rsp"]
+        del output.output_files["br_processed_rsp"]
     elif kind == "cross_member_file":
-        output.output_files["hr_br_processed_ppg"] = output.output_files["spo2_processed_ppg"]
+        output.output_files["hr_processed_ppg"] = output.output_files["spo2_processed_ppg"]
 
 
 @pytest.mark.parametrize("kind", [
@@ -64,7 +64,7 @@ def test_final_validator_rejects_damaged_real_summary(successful_scene, kind):
     output = deepcopy(successful_scene)
     _damage(output, kind)
     with pytest.raises(InferenceError) as error:
-        PPG_ACTIVE_OFFLINE_ALL_V1.result_validator(output)
+        PPG_ACTIVE_OFFLINE_ALL_V2.result_validator(output)
     assert error.value.code == "RESULT.INVALID_OUTPUT"
 
 
@@ -119,7 +119,7 @@ def test_failed_member_cannot_smuggle_fields_or_success_artifacts(tmp_path, scen
     elif damage == "metrics":
         output.metrics["spo2"] = 97.0
     elif damage == "files":
-        output.output_files["spo2_processed_ppg"] = output.output_files["hr_br_processed_ppg"]
+        output.output_files["spo2_processed_ppg"] = output.output_files["hr_processed_ppg"]
     with pytest.raises(InferenceError) as error:
         definition.result_validator(output)
     assert error.value.code == "RESULT.INVALID_OUTPUT"
@@ -128,7 +128,7 @@ def test_failed_member_cannot_smuggle_fields_or_success_artifacts(tmp_path, scen
 @pytest.mark.parametrize("kind", ["artifacts", "metrics", "inputs", "names"])
 def test_declaration_rejects_conflicts_instead_of_overwriting_contracts(kind):
     """声明并集冲突在执行前被拒绝，不能让后项覆盖前项。"""
-    first, second, third = PPG_SCENE.members
+    first, second, third = (PPG_SCENE.members[index] for index in (0, 2, 3))
     if kind == "artifacts":
         third = replace(third, definition=replace(
             third.definition,

@@ -137,11 +137,11 @@ def scene_case(tmp_path):
 @pytest.fixture(scope="module")
 def successful_scene(tmp_path_factory):
     """汇总篡改测试共用一次真实计算，不共享可变载荷。"""
-    from health_inference import PPG_ACTIVE_OFFLINE_ALL_V1
+    from health_inference import PPG_ACTIVE_OFFLINE_ALL_V2
 
     root = tmp_path_factory.mktemp("successful-scene")
     case = make_scene_case(root / "artifacts")
-    output = PPG_ACTIVE_OFFLINE_ALL_V1.create_runtime(case.resources()).run(case.input(root / "execution"))
+    output = PPG_ACTIVE_OFFLINE_ALL_V2.create_runtime(case.resources()).run(case.input(root / "execution"))
     assert output.payload["outcome"] == "ALL_SUCCEEDED"
     return output
 

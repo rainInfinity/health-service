@@ -21,7 +21,7 @@ def measurement_tasks():
     versions = {}
 
     def create(
-        algorithm="ppg.active.offline.hr_br.v1", payload=None, *,
+        algorithm="ppg.active.offline.hr.v1", payload=None, *,
         submitted_at=_SUBMITTED, status=Task.StatusChoices.SUCCEEDED,
         owner=None, source_channel=None, version=None, **capture,
     ):
@@ -66,7 +66,8 @@ def scene_payload():
         definitions = (
             {"bp": ("ppg_acc.active.offline.bp.v1", {"sbp": 125.85039300154746, "dbp": 76.03917873786334})}
             if bp else {
-                "hr_br": ("ppg.active.offline.hr_br.v1", {"hr": 79.12345678901234, "br": 17.12345678901234}),
+                "hr": ("ppg.active.offline.hr.v1", {"hr": 79.12345678901234}),
+                "br": ("ppg.active.offline.br.v1", {"br": 17.12345678901234}),
                 "spo2": ("ppg.active.offline.spo2.v1", {"spo2": 96.12345678901234}),
                 "diabetes": ("ppg.active.offline.diabetes.v1", {"prob": 0.5523077249526978, "risk_level": 0}),
             }

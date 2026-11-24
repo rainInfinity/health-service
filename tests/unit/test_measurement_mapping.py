@@ -15,13 +15,13 @@ from health_service.schemas.internal.measurements import MeasurementReadingData
     [
         ("bloodPressure", "ppg_acc.active.offline.bp.v1", "ppg_acc.active.offline.all.v1", "bp",
          (("sbp", "sbp", "mmHg"), ("dbp", "dbp", "mmHg"))),
-        ("heartRate", "ppg.active.offline.hr_br.v1", "ppg.active.offline.all.v1", "hr_br",
+        ("heartRate", "ppg.active.offline.hr.v1", "ppg.active.offline.all.v2", "hr",
          (("hr", "hr", "beats_per_minute"),)),
-        ("respirationRate", "ppg.active.offline.hr_br.v1", "ppg.active.offline.all.v1", "hr_br",
+        ("respirationRate", "ppg.active.offline.br.v1", "ppg.active.offline.all.v2", "br",
          (("br", "br", "breaths_per_minute"),)),
-        ("oxygenSaturation", "ppg.active.offline.spo2.v1", "ppg.active.offline.all.v1", "spo2",
+        ("oxygenSaturation", "ppg.active.offline.spo2.v1", "ppg.active.offline.all.v2", "spo2",
          (("spo2", "spo2", "percent"),)),
-        ("diabetesRisk", "ppg.active.offline.diabetes.v1", "ppg.active.offline.all.v1", "diabetes",
+        ("diabetesRisk", "ppg.active.offline.diabetes.v1", "ppg.active.offline.all.v2", "diabetes",
          (("prob", "diabetes_probability", "ratio"),)),
     ],
 )
@@ -89,12 +89,12 @@ def test_record_keeps_identity_version_submitted_precision_and_original_values(m
     assert record.risk_level == (0 if metric == "diabetesRisk" else None)
 
 
-def test_hr_br_share_actual_quality_and_exclude_private_payload_fields():
-    """共用同一次质量，只复制 score/threshold，不携带原结果里的额外诊断。"""
+def test_independent_rates_keep_own_quality_and_exclude_private_payload_fields():
+    """同源 PPG 的两项质量独立装配，只复制各自 score/threshold。"""
     row = {**_row(), "private_path": "PRIVATE", "quality_extra": "PRIVATE"}
     hr = _record_data(row, MEASUREMENT_DEFINITIONS["heartRate"])
-    br = _record_data(row, MEASUREMENT_DEFINITIONS["respirationRate"])
-    assert hr.quality == br.quality
+    br = _record_data({**row, "_m_public_score": 91.25}, MEASUREMENT_DEFINITIONS["respirationRate"])
+    assert br.quality.model_dump() == {"score": 91.25, "threshold": 70}
     assert hr.quality.model_dump() == {"score": 88.65866718458382, "threshold": 70}
     assert "PRIVATE" not in repr(hr.model_dump())
     assert "PRIVATE" not in repr(br.model_dump())

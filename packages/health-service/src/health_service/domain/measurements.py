@@ -41,7 +41,7 @@ class MeasurementDefinition:
     sources: tuple[MeasurementSource, ...]  # 仅显式支持的两个来源。
     readings: tuple[MeasurementReading, ...]  # 血压的两项必须同时有效。
     risk_key: str | None = None  # 风险编码字段；非风险指标不读取。
-    quality_threshold: int = 70  # 四个既有算法实际采用的固定质量阈值。
+    quality_threshold: int = 70  # 五个独立算法实际采用的固定质量阈值。
 
 
 def _sources(algorithm_key: str, scene_key: str, member: str) -> tuple[MeasurementSource, ...]:
@@ -53,10 +53,11 @@ def _sources(algorithm_key: str, scene_key: str, member: str) -> tuple[Measureme
 
 
 _BP = "ppg_acc.active.offline.bp.v1"
-_HR_BR = "ppg.active.offline.hr_br.v1"
+_HR = "ppg.active.offline.hr.v1"
+_BR = "ppg.active.offline.br.v1"
 _SPO2 = "ppg.active.offline.spo2.v1"
 _DIABETES = "ppg.active.offline.diabetes.v1"
-_PPG_SCENE = "ppg.active.offline.all.v1"
+_PPG_SCENE = "ppg.active.offline.all.v2"
 _BP_SCENE = "ppg_acc.active.offline.all.v1"
 
 MEASUREMENT_DEFINITIONS = MappingProxyType({
@@ -68,11 +69,11 @@ MEASUREMENT_DEFINITIONS = MappingProxyType({
         ),
     ),
     "heartRate": MeasurementDefinition(
-        "heartRate", _HR_BR, _sources(_HR_BR, _PPG_SCENE, "hr_br"),
+        "heartRate", _HR, _sources(_HR, _PPG_SCENE, "hr"),
         (MeasurementReading("hr", "hr", "beats_per_minute"),),
     ),
     "respirationRate": MeasurementDefinition(
-        "respirationRate", _HR_BR, _sources(_HR_BR, _PPG_SCENE, "hr_br"),
+        "respirationRate", _BR, _sources(_BR, _PPG_SCENE, "br"),
         (MeasurementReading("br", "br", "breaths_per_minute", minimum=8, maximum=20),),
     ),
     "oxygenSaturation": MeasurementDefinition(

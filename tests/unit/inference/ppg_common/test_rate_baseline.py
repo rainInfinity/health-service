@@ -3,12 +3,9 @@
 import math
 
 import pytest
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.inference import (
-    estimate_rates,
-)
-from health_inference.algorithms.ppg_active_offline_hr_br_v1.preprocessing import (
-    preprocess_ppg,
-)
+from health_inference.algorithms.ppg_active_offline_hr_v1.inference import estimate_hr
+from health_inference.algorithms.ppg_active_offline_br_v1.inference import estimate_br
+from health_inference.utils.ppg_preprocessing import preprocess_ppg
 from health_inference.utils.ppg_input import PPGInput
 
 
@@ -26,16 +23,13 @@ def _estimate(heart_rate_hz: float, sampling_rate_hz: float):
         )
         for index in range(sample_count)
     )
-    return estimate_rates(
-        preprocess_ppg(
-            PPGInput(
-                timestamps_ms=timestamps_ms,
-                channels=channels,
-                channel_format="rgb",
-                sampling_rate_hz=sampling_rate_hz,
-            )
-        )
-    )
+    prepared = preprocess_ppg(PPGInput(
+        timestamps_ms=timestamps_ms,
+        channels=channels,
+        channel_format="rgb",
+        sampling_rate_hz=sampling_rate_hz,
+    ))
+    return estimate_hr(prepared), estimate_br(prepared)
 
 
 def test_rate_estimates_follow_two_distinct_heart_components_and_old_baseline():
@@ -43,16 +37,16 @@ def test_rate_estimates_follow_two_distinct_heart_components_and_old_baseline():
     slower = _estimate(1.2, 30.0)
     faster = _estimate(1.5, 30.0)
 
-    assert slower.hr == pytest.approx(72.0, abs=0.2)
-    assert faster.hr == pytest.approx(90.0, abs=0.2)
-    assert slower.br == pytest.approx(12.03265584092234, abs=0.05)
-    assert faster.br == pytest.approx(12.034994390836363, abs=0.05)
-    assert slower.hr != faster.hr
+    assert slower[0] == pytest.approx(72.0, abs=0.2)
+    assert faster[0] == pytest.approx(90.0, abs=0.2)
+    assert slower[1] == pytest.approx(12.03265584092234, abs=0.05)
+    assert faster[1] == pytest.approx(12.034994390836363, abs=0.05)
+    assert slower[0] != faster[0]
 
 
 def test_rate_functions_keep_legacy_integer_sampling_rate_interpretation():
     """非整数采样率仍按旧链传给 NeuroKit2 的 int(fs) 解释。"""
     result = _estimate(1.2, 29.5)
 
-    assert result.hr == pytest.approx(70.78411130202367, abs=0.05)
-    assert result.br == pytest.approx(11.817181891662122, abs=0.05)
+    assert result[0] == pytest.approx(70.78411130202367, abs=0.05)
+    assert result[1] == pytest.approx(11.817181891662122, abs=0.05)

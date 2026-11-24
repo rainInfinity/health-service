@@ -110,7 +110,7 @@ def test_measurement_migration_preserves_history_results_and_optional_projection
         version = apps.get_model("health_service", "ModelVersion").objects.create(
             model=model,
             version="1.0",
-            algorithm_key="ppg.active.offline.hr_br.v1",
+            algorithm_key="ppg.active.offline.hr.v1",
             published_at=now,
             **audit,
         )
@@ -134,7 +134,7 @@ def test_measurement_migration_preserves_history_results_and_optional_projection
                 submitted_at=now,
                 started_at=now,
                 finished_at=now,
-                result_payload={"hr": 73.125, "br": 17.5, "private": {"raw": [1, 2]}},
+                result_payload={"hr": 73.125, "private": {"raw": [1, 2]}},
                 **audit,
             )
             input_model.objects.create(

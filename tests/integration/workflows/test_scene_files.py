@@ -149,7 +149,7 @@ def test_scene_files_match_real_members_and_protected_downloads(scene_environmen
             if member_name == "bp":
                 assert header == (["timestamp", "ppg"] if name == "processed_ppg" else ["timestamp", "scgX", "scgY", "scgZ"])
             else:
-                timestamp_column = "timestamp" if member_name == "hr_br" else "timestampFrame"
+                timestamp_column = "timestamp" if member_name in {"hr", "br"} else "timestampFrame"
                 assert header == [timestamp_column, "rsp" if name == "processed_rsp" else "ppg"]
     assert _projected_metrics(task) == expected_metrics
     formal = _task_output_root(environment.storage.task_data_root, task)
@@ -195,12 +195,12 @@ def test_failed_member_written_files_are_removed_before_publication(scene_enviro
     assert "PRIVATE" not in str(result.payload)
     execution_dir = environment.storage.task_data_root / ".executions" / str(task.pk) / token.hex
     assert not (execution_dir / "diabetes").exists()
-    assert {path.name for path in execution_dir.iterdir()} == {"hr_br", "spo2"}
+    assert {path.name for path in execution_dir.iterdir()} == {"hr", "br", "spo2"}
     assert save_task_execution_success(task_id=task.pk, execution_token=token, result=result)
     task.refresh_from_db()
     formal = _task_output_root(environment.storage.task_data_root, task)
     expected_tree = {
-        "hr_br/ppg-processed.csv", "hr_br/rsp-processed.csv", "spo2/ppg-processed.csv"
+        "hr/ppg-processed.csv", "br/rsp-processed.csv", "spo2/ppg-processed.csv"
     }
     assert set(_file_bytes(formal)) == expected_tree
     registered = {
@@ -322,7 +322,7 @@ def test_all_failed_scene_has_no_formal_directory_and_replay_does_not_compute(
     names = (
         ("bp_processed_ppg", "bp_processed_scg")
         if algorithm_key == BP_SCENE
-        else ("hr_br_processed_ppg", "hr_br_processed_rsp", "spo2_processed_ppg", "diabetes_processed_ppg")
+        else ("hr_processed_ppg", "br_processed_rsp", "spo2_processed_ppg", "diabetes_processed_ppg")
     )
     bodies, detail = asyncio.run(_download_scene(environment, task.pk, (), names))
     assert bodies == {}

@@ -207,7 +207,6 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
 
             for code, unit in (
                 ("hr", "beats_per_minute"),
-                ("br", "breaths_per_minute"),
             ):
                 create_metric_definition(
                     code=code,
@@ -218,25 +217,25 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
             first_draft = create_model_version(
                 model_id=model.model_id,
                 version="1.0",
-                algorithm_key="ppg.active.offline.hr_br.v1",
+                algorithm_key="ppg.active.offline.hr.v1",
                 params=None,
             )
 
             set_model_version_metrics(
                 version_id=first_draft.version_id,
-                metric_codes=("hr", "br"),
+                metric_codes=("hr",),
             )
             first_version = publish_model_version(version_id=first_draft.version_id)
             second_draft = create_model_version(
                 model_id=model.model_id,
                 version="2.0",
-                algorithm_key="ppg.active.offline.hr_br.v1",
+                algorithm_key="ppg.active.offline.hr.v1",
                 params=None,
             )
 
             set_model_version_metrics(
                 version_id=second_draft.version_id,
-                metric_codes=("hr", "br"),
+                metric_codes=("hr",),
             )
             second_version = publish_model_version(version_id=second_draft.version_id)
             select_channel_model_version(
@@ -286,8 +285,8 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
             assert first_result.metrics["hr"] == pytest.approx(72.0, abs=0.2)
             assert second_result.metrics["hr"] == pytest.approx(90.0, abs=0.2)
             assert first_result.metrics["hr"] != second_result.metrics["hr"]
-            assert set(first_result.output_files) == {"processed_ppg", "processed_rsp"}
-            assert set(second_result.output_files) == {"processed_ppg", "processed_rsp"}
+            assert set(first_result.output_files) == {"processed_ppg"}
+            assert set(second_result.output_files) == {"processed_ppg"}
             assert (
                 first_result.output_files["processed_ppg"]
                 != second_result.output_files["processed_ppg"]
@@ -296,28 +295,15 @@ def test_same_version_tasks_use_own_inputs_after_channel_switch(tmp_path):
                 StorageArea.TASK_DATA,
                 first_result.output_files["processed_ppg"],
             )
-            first_rsp = storage.resolve_file(
-                StorageArea.TASK_DATA,
-                first_result.output_files["processed_rsp"],
-            )
             second_ppg = storage.resolve_file(
                 StorageArea.TASK_DATA,
                 second_result.output_files["processed_ppg"],
             )
-            second_rsp = storage.resolve_file(
-                StorageArea.TASK_DATA,
-                second_result.output_files["processed_rsp"],
-            )
-            assert (first_ppg.name, first_rsp.name, second_ppg.name, second_rsp.name) == (
-                "ppg-processed.csv",
-                "rsp-processed.csv",
-                "ppg-processed.csv",
-                "rsp-processed.csv",
+            assert (first_ppg.name, second_ppg.name) == (
+                "ppg-processed.csv", "ppg-processed.csv",
             )
             with first_ppg.open(encoding="utf-8") as output:
                 assert output.readline().rstrip("\r\n") == "timestamp,ppg"
-            with first_rsp.open(encoding="utf-8") as output:
-                assert output.readline().rstrip("\r\n") == "timestamp,rsp"
             assert (
                 storage.task_data_root
                 / ".executions"

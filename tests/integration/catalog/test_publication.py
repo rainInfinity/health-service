@@ -300,7 +300,7 @@ def test_test_algorithm_version_publishes_without_artifacts_and_is_immutable(tmp
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "algorithm_key",
-    ["hr_br", "ppg.active.offline.hr_br", "missing.algorithm"],
+    ["hr_br", "ppg.active.offline.hr_br", "ppg.active.offline.hr_br.v1", "ppg.active.offline.all.v1", "missing.algorithm"],
 )
 def test_template_and_unknown_algorithms_cannot_be_published(algorithm_key):
     """旧模板、无修订号别名和未知标识都不能发布。"""
@@ -364,21 +364,20 @@ def test_publish_requires_exact_artifact_inventory_and_existing_file(tmp_path, m
 
 
 def _create_ppg_v1_version(*, params: dict | None = None):
-    """创建正式 HR/BR v1 的未发布版本。"""
+    """创建正式 HR v1 的未发布版本。"""
     model = create_model(code="pulse-v1", name="Pulse v1", description=None)
     return create_model_version(
         model_id=model.model_id,
         version="1.0",
-        algorithm_key="ppg.active.offline.hr_br.v1",
+        algorithm_key="ppg.active.offline.hr.v1",
         params=params,
     )
 
 
 def _add_ppg_v1_metrics(version_id: int) -> None:
-    """选择正式 v1 声明的两个固定单位指标。"""
+    """选择独立 HR v1 唯一的固定单位指标。"""
     definitions = (
         ("hr", "beats_per_minute"),
-        ("br", "breaths_per_minute"),
     )
     for code, unit in definitions:
         create_metric_definition(
@@ -409,7 +408,7 @@ def test_official_ppg_v1_publishes_without_artifacts(tmp_path):
     assert not ModelArtifact.objects.filter(model_version_id=version.version_id).exists()
     assert tuple(
         metric.code for metric in list_model_version_metrics(version_id=version.version_id)
-    ) == ("hr", "br")
+    ) == ("hr",)
 
 
 @pytest.mark.django_db

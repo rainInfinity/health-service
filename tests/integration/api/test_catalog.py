@@ -70,7 +70,7 @@ def test_manager_publishes_ppg_v1_and_users_see_only_their_channel():
 
         model_response = await client.post(
             "/api/v1/manager/models",
-            data=json.dumps({"code": "hr-br", "name": "HR/BR v1"}),
+            data=json.dumps({"code": "hr", "name": "HR v1"}),
             content_type="application/json",
             headers=manager_headers,
         )
@@ -80,7 +80,7 @@ def test_manager_publishes_ppg_v1_and_users_see_only_their_channel():
             data=json.dumps(
                 {
                     "version": "1.0.0",
-                    "algorithmKey": "ppg.active.offline.hr_br.v1",
+                    "algorithmKey": "ppg.active.offline.hr.v1",
                     "params": None,
                 }
             ),
@@ -94,12 +94,6 @@ def test_manager_publishes_ppg_v1_and_users_see_only_their_channel():
                 "description": "心率",
                 "valueType": "number",
                 "unit": "beats_per_minute",
-            },
-            {
-                "code": "br",
-                "description": "呼吸率",
-                "valueType": "number",
-                "unit": "breaths_per_minute",
             },
         )
         metric_responses = []
@@ -208,14 +202,14 @@ def test_manager_publishes_ppg_v1_and_users_see_only_their_channel():
         publish_response.status_code,
         selection_response.status_code,
     ] == [200, 200, 200, 201, 201, 200, 200, 200]
-    assert [response.status_code for response in metric_responses] == [201, 201]
+    assert [response.status_code for response in metric_responses] == [201]
     ios_payload = ios_models.json()["data"]
     assert ios_payload["total"] == 1
     assert ios_payload["items"] == [
         {
             "modelId": model_response.json()["data"]["modelId"],
-            "modelCode": "hr-br",
-            "modelName": "HR/BR v1",
+            "modelCode": "hr",
+            "modelName": "HR v1",
             "versionId": version_response.json()["data"]["versionId"],
             "version": "1.0.0",
             "requiredInputs": ["ppg"],

@@ -13,11 +13,12 @@ from health_service.models import Channel, ChannelModelSelection, Model, ModelVe
 pytestmark = pytest.mark.django_db(transaction=True)
 
 _METRICS = ("bloodPressure", "heartRate", "respirationRate", "oxygenSaturation", "diabetesRisk")
-_HR = "ppg.active.offline.hr_br.v1"
+_HR = "ppg.active.offline.hr.v1"
+_BR = "ppg.active.offline.br.v1"
 _BP = "ppg_acc.active.offline.bp.v1"
 _SPO2 = "ppg.active.offline.spo2.v1"
 _DIABETES = "ppg.active.offline.diabetes.v1"
-_SCENE = "ppg.active.offline.all.v1"
+_SCENE = "ppg.active.offline.all.v2"
 _STAMP = datetime(2026, 11, 21, 16, tzinfo=UTC)
 _QUALITY = {"score": 88.123456789, "threshold": 70, "privatePath": "/private/quality"}
 
@@ -32,7 +33,7 @@ def measurement_environment(settings):
     model = Model.objects.create(code=f"measurement-{uuid4().hex}", name="历史健康记录")
     versions = {
         key: ModelVersion.objects.create(model=model, version=str(index), algorithm_key=key, published_at=_STAMP)
-        for index, key in enumerate((_HR, _BP, _SPO2, _DIABETES, _SCENE), start=1)
+        for index, key in enumerate((_HR, _BR, _BP, _SPO2, _DIABETES, _SCENE), start=1)
     }
     client = Client(HTTP_AUTHORIZATION=f"Bearer {issue_token_pair(user, channel.label).access_token}")
     return SimpleNamespace(user=user, channel=channel, other_channel=other_channel, model=model, versions=versions, client=client)
@@ -63,8 +64,8 @@ def _history(client, **kwargs):
 
 @pytest.mark.parametrize(("metric", "algorithm", "payload", "readings", "risk"), [
     ("bloodPressure", _BP, {"sbp": 123.456789, "dbp": 78.123456}, [("sbp", 123.456789, "mmHg"), ("dbp", 78.123456, "mmHg")], None),
-    ("heartRate", _HR, {"hr": 77.123456, "br": 16.987654}, [("hr", 77.123456, "beats_per_minute")], None),
-    ("respirationRate", _HR, {"hr": 77.123456, "br": 16.987654}, [("br", 16.987654, "breaths_per_minute")], None),
+    ("heartRate", _HR, {"hr": 77.123456}, [("hr", 77.123456, "beats_per_minute")], None),
+    ("respirationRate", _BR, {"br": 16.987654}, [("br", 16.987654, "breaths_per_minute")], None),
     ("oxygenSaturation", _SPO2, {"spo2": 97.654321}, [("spo2", 97.654321, "percent")], None),
     ("diabetesRisk", _DIABETES, {"prob": 0.543210987, "risk_level": 2}, [("diabetes_probability", 0.543210987, "ratio")], 2),
 ])
@@ -92,21 +93,24 @@ def test_independent_results_keep_original_values_and_public_whitelist(measureme
 def test_latest_selects_submission_order_ties_and_fixed_versions(measurement_environment):
     """完成乱序、同提交时间和渠道版本切换都不改变按提交选择的规则。"""
     env = measurement_environment
-    old = _success(env, _HR, {"hr": 60, "br": 12}, stamp=_STAMP - timedelta(seconds=1), finished=_STAMP + timedelta(days=2))
-    new = _success(env, _HR, {"hr": 80, "br": 18}, finished=_STAMP + timedelta(minutes=1))
-    tied = _success(env, _HR, {"hr": 81, "br": 17}, finished=_STAMP + timedelta(minutes=2))
+    old = _success(env, _HR, {"hr": 60}, stamp=_STAMP - timedelta(seconds=1), finished=_STAMP + timedelta(days=2))
+    new = _success(env, _HR, {"hr": 80}, finished=_STAMP + timedelta(minutes=1))
+    tied = _success(env, _HR, {"hr": 81}, finished=_STAMP + timedelta(minutes=2))
+    respiration = _success(env, _BR, {"br": 17}, finished=_STAMP + timedelta(minutes=2))
     newer_version = ModelVersion.objects.create(model=env.model, version="new-current", algorithm_key=_HR, published_at=_STAMP)
     ChannelModelSelection.objects.create(channel=env.channel, model=env.model, current_version=newer_version)
     Task.objects.create(user=env.user, channel=env.channel, model_version=newer_version, status="SUBMITTED", submitted_at=_STAMP + timedelta(days=1))
     Task.objects.create(user=env.user, channel=env.channel, model_version=newer_version, status="FAILED", submitted_at=_STAMP + timedelta(days=1), finished_at=_STAMP + timedelta(days=1), failure_code="INFERENCE.QUALITY_REJECTED")
-    _success(env, _HR, {"hr": 200, "br": 16}, stamp=_STAMP + timedelta(days=3), channel=env.other_channel)
+    _success(env, _HR, {"hr": 200}, stamp=_STAMP + timedelta(days=3), channel=env.other_channel)
     other = get_user_model().objects.create_user(username=f"other-{uuid4().hex}")
-    _success(env, _HR, {"hr": 210, "br": 15}, stamp=_STAMP + timedelta(days=3), user=other)
+    _success(env, _HR, {"hr": 210}, stamp=_STAMP + timedelta(days=3), user=other)
     response = env.client.get("/api/v1/android-cn/measurements/latest")
     assert response.status_code == 200
     data = response.json()["data"]
     assert set(data) == set(_METRICS)
-    assert data["heartRate"]["taskId"] == data["respirationRate"]["taskId"] == tied.pk
+    assert data["heartRate"]["taskId"] == tied.pk
+    assert data["respirationRate"]["taskId"] == respiration.pk
+    assert data["respirationRate"]["versionId"] == env.versions[_BR].pk
     assert data["heartRate"]["versionId"] == env.versions[_HR].pk
     assert data["bloodPressure"] is data["oxygenSaturation"] is data["diabetesRisk"] is None
     page = _history(env.client, limit=2).json()["data"]
@@ -119,16 +123,16 @@ def test_latest_selects_submission_order_ties_and_fixed_versions(measurement_env
 def test_beijing_boundaries_pagination_and_concurrent_insert(measurement_environment):
     """包含首尾日且保留微秒排序；请求间新结果可改变 total 和后页。"""
     env = measurement_environment
-    _success(env, _HR, {"hr": 50, "br": 10}, stamp=_STAMP - timedelta(microseconds=1))
-    first = _success(env, _HR, {"hr": 61, "br": 11})
-    last = _success(env, _HR, {"hr": 62, "br": 12}, stamp=_STAMP + timedelta(days=1, microseconds=-1))
-    _success(env, _HR, {"hr": 99, "br": 17}, stamp=_STAMP + timedelta(days=1))
+    _success(env, _HR, {"hr": 50}, stamp=_STAMP - timedelta(microseconds=1))
+    first = _success(env, _HR, {"hr": 61})
+    last = _success(env, _HR, {"hr": 62}, stamp=_STAMP + timedelta(days=1, microseconds=-1))
+    _success(env, _HR, {"hr": 99}, stamp=_STAMP + timedelta(days=1))
     page = _history(env.client, limit=1).json()["data"]
     assert page["total"] == 2
     assert [item["taskId"] for item in page["items"]] == [last.pk]
     second = _history(env.client, limit=1, offset=1).json()["data"]
     assert [item["taskId"] for item in second["items"]] == [first.pk]
-    inserted = _success(env, _HR, {"hr": 63, "br": 13}, stamp=_STAMP + timedelta(hours=23, minutes=59, seconds=59, microseconds=999999))
+    inserted = _success(env, _HR, {"hr": 63}, stamp=_STAMP + timedelta(hours=23, minutes=59, seconds=59, microseconds=999999))
     changed = _history(env.client, limit=1, offset=1).json()["data"]
     assert changed["total"] == 3
     assert [item["taskId"] for item in changed["items"]] == [last.pk]
@@ -140,7 +144,7 @@ def test_beijing_boundaries_pagination_and_concurrent_insert(measurement_environ
 def test_full_calendar_range_is_not_artificially_limited(measurement_environment):
     """合法的公历年份边界不触发时间转换溢出或新增日期跨度限制。"""
     env = measurement_environment
-    task = _success(env, _HR, {"hr": 75, "br": 15})
+    task = _success(env, _HR, {"hr": 75})
     response = _history(env.client, **{"from": "0001-01-01", "to": "9999-12-31"})
     assert response.status_code == 200
     assert response.json()["data"]["total"] == 1
